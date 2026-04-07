@@ -1,0 +1,119 @@
+{
+  "name": "milo-code",
+  "displayName": "Milo Code",
+  "description": "AI coding agent powered by Gemma 4 — self-hosted Claude Code alternative",
+  "version": "0.6.0",
+  "publisher": "inferx",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/inferx/milo-code" },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Chat", "Programming Languages"],
+  "keywords": ["ai", "coding", "agent", "gemma", "milo"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "milo-code",
+          "title": "Milo Code",
+          "icon": "media/milo.svg"
+        }
+      ]
+    },
+    "views": {
+      "milo-code": [
+        {
+          "type": "webview",
+          "id": "milo-code.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "milo-code.newChat",
+        "title": "Milo Code: New Chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "milo-code.sendMessage",
+        "title": "Milo Code: Send Message"
+      },
+      {
+        "command": "milo-code.stopGeneration",
+        "title": "Milo Code: Stop Generation",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "milo-code.openSettings",
+        "title": "Milo Code: Settings",
+        "icon": "$(gear)"
+      }
+    ],
+    "configuration": {
+      "title": "Milo Code",
+      "properties": {
+        "miloCode.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key cho platform Inferx (sk-inferx-xxx)",
+          "order": 1
+        },
+        "miloCode.baseUrl": {
+          "type": "string",
+          "default": "https://api.inferx.x-or.cloud",
+          "description": "API base URL",
+          "order": 2
+        },
+        "miloCode.model": {
+          "type": "string",
+          "default": "gemma4",
+          "description": "Model name",
+          "order": 3
+        },
+        "miloCode.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "description": "Max tokens per response",
+          "order": 4
+        },
+        "miloCode.permissionMode": {
+          "type": "string",
+          "enum": ["read-only", "workspace-write", "danger-full-access"],
+          "default": "workspace-write",
+          "description": "Permission mode for tool execution",
+          "order": 5
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "milo-code.newChat",
+          "when": "view == milo-code.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "milo-code.openSettings",
+          "when": "view == milo-code.chatView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./ && node -e \"const fs=require('fs'),path=require('path');fs.mkdirSync('out/reference_data',{recursive:true});fs.copyFileSync('src/reference_data/tool_schemas.json','out/reference_data/tool_schemas.json');\"",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

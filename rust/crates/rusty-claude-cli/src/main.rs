@@ -189,6 +189,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
         } => LiveCli::new(model, true, allowed_tools, permission_mode)?
             .run_turn_with_output(&prompt, output_format)?,
+        CliAction::PromptWithResume {
+            prompt,
+            session_path,
+            model,
+            output_format,
+            allowed_tools,
+            permission_mode,
+        } => LiveCli::new_from_session(&session_path, model, allowed_tools, permission_mode)?
+            .run_turn_with_output(&prompt, output_format)?,
         CliAction::Login { output_format } => run_login(output_format)?,
         CliAction::Logout { output_format } => run_logout(output_format)?,
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
@@ -252,6 +261,14 @@ enum CliAction {
     },
     Prompt {
         prompt: String,
+        model: String,
+        output_format: CliOutputFormat,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+    },
+    PromptWithResume {
+        prompt: String,
+        session_path: PathBuf,
         model: String,
         output_format: CliOutputFormat,
         allowed_tools: Option<AllowedToolSet>,
@@ -437,7 +454,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         });
     }
     if rest.first().map(String::as_str) == Some("--resume") {
-        return parse_resume_args(&rest[1..], output_format);
+        let allowed_tools = normalize_allowed_tools(&allowed_tool_values)?;
+        let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+        return parse_resume_args(&rest[1..], output_format, &model, allowed_tools, permission_mode);
     }
     if let Some(action) = parse_local_help_action(&rest) {
         return action;
@@ -888,7 +907,13 @@ fn parse_system_prompt_args(
     })
 }
 
-fn parse_resume_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
+fn parse_resume_args(
+    args: &[String],
+    output_format: CliOutputFormat,
+    model: &str,
+    allowed_tools: Option<AllowedToolSet>,
+    permission_mode: PermissionMode,
+) -> Result<CliAction, String> {
     let (session_path, command_tokens): (PathBuf, &[String]) = match args.first() {
         None => (PathBuf::from(LATEST_SESSION_REFERENCE), &[]),
         Some(first) if looks_like_slash_command_token(first) => {
@@ -896,6 +921,23 @@ fn parse_resume_args(args: &[String], output_format: CliOutputFormat) -> Result<
         }
         Some(first) => (PathBuf::from(first), &args[1..]),
     };
+
+    // If trailing tokens are a plain prompt (not slash commands), resume the session
+    // and run one new turn with the prompt. This enables non-interactive session continuity:
+    // e.g. `claw --resume latest "follow-up question"`
+    if let Some(first_token) = command_tokens.first() {
+        if !first_token.trim_start().starts_with('/') {
+            return Ok(CliAction::PromptWithResume {
+                prompt: command_tokens.join(" "),
+                session_path,
+                model: model.to_string(),
+                output_format,
+                allowed_tools,
+                permission_mode,
+            });
+        }
+    }
+
     let mut commands = Vec::new();
     let mut current_command = String::new();
 
@@ -3053,6 +3095,36 @@ impl LiveCli {
         };
         cli.persist_session()?;
         Ok(cli)
+    }
+
+    fn new_from_session(
+        session_path: &Path,
+        model: String,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let system_prompt = build_system_prompt()?;
+        let handle = resolve_session_reference(&session_path.display().to_string())?;
+        let session = Session::load_from_path(&handle.path)?;
+        let runtime = build_runtime(
+            session,
+            &handle.id,
+            model.clone(),
+            system_prompt.clone(),
+            true,
+            true,
+            allowed_tools.clone(),
+            permission_mode,
+            None,
+        )?;
+        Ok(Self {
+            model,
+            allowed_tools,
+            permission_mode,
+            system_prompt,
+            runtime,
+            session: handle,
+        })
     }
 
     fn startup_banner(&self) -> String {

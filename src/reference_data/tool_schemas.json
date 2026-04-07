@@ -1,0 +1,170 @@
+[
+  {
+    "name": "BashTool",
+    "description": "Execute a shell command in the workspace directory. Use for running tests, installs, builds, git operations, and any other terminal commands.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The shell command to execute"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "Timeout in seconds (default 60, max 300)"
+        }
+      },
+      "required": ["command"]
+    }
+  },
+  {
+    "name": "FileReadTool",
+    "description": "Read the contents of a file. Returns file content with line numbers. Use this before editing a file to understand its current state.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path to the file, relative to the workspace root"
+        }
+      },
+      "required": ["file_path"]
+    }
+  },
+  {
+    "name": "FileWriteTool",
+    "description": "Create a new file or completely overwrite an existing file with new content. Use when creating files from scratch. For small targeted edits to existing files, prefer FileEditTool instead.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path to the file, relative to the workspace root"
+        },
+        "content": {
+          "type": "string",
+          "description": "The full content to write to the file"
+        }
+      },
+      "required": ["file_path", "content"]
+    }
+  },
+  {
+    "name": "FileEditTool",
+    "description": "Make a targeted edit to an existing file by replacing an exact string with a new string. The old_string must appear exactly once in the file. Always use FileReadTool first to see the current content.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path to the file, relative to the workspace root"
+        },
+        "old_string": {
+          "type": "string",
+          "description": "The exact text to find and replace (must exist exactly once in the file)"
+        },
+        "new_string": {
+          "type": "string",
+          "description": "The new text to replace old_string with"
+        }
+      },
+      "required": ["file_path", "old_string", "new_string"]
+    }
+  },
+  {
+    "name": "GlobTool",
+    "description": "Find files matching a glob pattern. Use to discover what files exist in the workspace. Example patterns: **/*.ts, src/**/*.py, **/package.json",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Glob pattern to match files (e.g. **/*.ts, src/**/*.py)"
+        },
+        "base_path": {
+          "type": "string",
+          "description": "Subdirectory to search from, relative to workspace root (optional)"
+        }
+      },
+      "required": ["pattern"]
+    }
+  },
+  {
+    "name": "GrepTool",
+    "description": "Search file contents using a regex pattern. Returns matching lines with file path and line number. Use to find where code, strings, or patterns are used.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to search for"
+        },
+        "path": {
+          "type": "string",
+          "description": "Directory or file to search in, relative to workspace root (optional, defaults to entire workspace)"
+        },
+        "include": {
+          "type": "string",
+          "description": "File extension filter, e.g. *.py or *.ts (optional)"
+        }
+      },
+      "required": ["pattern"]
+    }
+  },
+  {
+    "name": "ListDirectoryTool",
+    "description": "List the files and subdirectories in a directory. Use to explore the workspace structure.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Directory path, relative to the workspace root"
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "WebFetchTool",
+    "description": "Fetch the content of a web page or URL. Use to retrieve documentation, check APIs, or read external resources.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The URL to fetch"
+        }
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "TodoWriteTool",
+    "description": "Create or update the todo list for the current task. Use this at the start of any multi-step task to plan your work, then update it as you complete each step. The todo list is shown to the user so they can track your progress.\n\nTodo item status values:\n- 'pending': not started yet\n- 'in_progress': currently working on (max 1 at a time)\n- 'done': completed successfully\n- 'blocked': cannot proceed, needs user input\n\nAlways update to 'in_progress' before starting a step, and 'done' immediately after completing it.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "todos": {
+          "type": "array",
+          "description": "Complete list of todo items. Must include ALL items — both existing and new.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "description": "Short unique identifier, e.g. '1', '2'" },
+              "title": { "type": "string", "description": "Concise action-oriented task label (3-7 words)" },
+              "status": {
+                "type": "string",
+                "enum": ["pending", "in_progress", "done", "blocked"],
+                "description": "Current status of this todo"
+              },
+              "note": { "type": "string", "description": "Optional short note (result, blocker reason)" }
+            },
+            "required": ["id", "title", "status"]
+          }
+        }
+      },
+      "required": ["todos"]
+    }
+  }
+]

@@ -1,0 +1,29 @@
+# Python + Rust source — không cần trong vsix
+src/
+tests/
+*.py
+*.sh
+rust/
+
+# Benchmarks & reports
+benchmark_*/
+report.html
+
+# Dev files
+.git/
+.gitignore
+node_modules/
+**/*.map
+**/*.ts
+!out/**
+
+# Misc
+downloads/
+assets/
+docs/
+ARCHITECTURE.md
+LIFECYCLE.md
+PARITY.md
+PHILOSOPHY.md
+ROADMAP.md
+USAGE.md
