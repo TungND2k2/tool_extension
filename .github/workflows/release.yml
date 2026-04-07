@@ -35,7 +35,7 @@ jobs:
             bin: claw
             artifact_name: claw-linux-arm64
           - name: macos-x64
-            os: macos-13
+            os: macos-latest
             target: x86_64-apple-darwin
             bin: claw
             artifact_name: claw-darwin-x64
