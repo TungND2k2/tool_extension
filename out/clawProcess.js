@@ -67,6 +67,11 @@ class ClawProcess {
     proc = null;
     hasSession = false;
     binaryReady = false; // cached after first successful ensureInstalled
+    sessionsDir = null;
+    /** Called by ChatViewProvider with context.globalStorageUri/sessions path */
+    setSessionsDir(dir) {
+        this.sessionsDir = dir;
+    }
     resetSession() {
         this.hasSession = false;
     }
@@ -236,11 +241,15 @@ class ClawProcess {
         const config = vscode.workspace.getConfiguration("miloCode");
         const apiKey = config.get("apiKey", "");
         const baseUrl = config.get("baseUrl", "https://api.inferx.x-or.cloud");
-        return {
+        const env = {
             ...process.env,
             ANTHROPIC_API_KEY: apiKey,
             ANTHROPIC_BASE_URL: baseUrl,
         };
+        if (this.sessionsDir) {
+            env.CLAW_SESSIONS_DIR = this.sessionsDir;
+        }
+        return env;
     }
     getArgs(prompt) {
         const config = vscode.workspace.getConfiguration("miloCode");

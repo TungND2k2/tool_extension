@@ -196,8 +196,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_format,
             allowed_tools,
             permission_mode,
-        } => LiveCli::new_from_session(&session_path, model, allowed_tools, permission_mode)?
-            .run_turn_with_output(&prompt, output_format)?,
+        } => {
+            // If no session exists yet (e.g. extension passes --resume latest on first call),
+            // fall back to starting a fresh session rather than returning an error.
+            match LiveCli::new_from_session(&session_path, model.clone(), allowed_tools.clone(), permission_mode) {
+                Ok(mut cli) => cli.run_turn_with_output(&prompt, output_format)?,
+                Err(_) => {
+                    let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
+                    cli.run_turn_with_output(&prompt, output_format)?;
+                }
+            }
+        }
         CliAction::Login { output_format } => run_login(output_format)?,
         CliAction::Logout { output_format } => run_logout(output_format)?,
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
@@ -4014,6 +4023,31 @@ impl LiveCli {
 
 fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
+    if let Ok(dir) = env::var("CLAW_SESSIONS_DIR") {
+        if !dir.is_empty() {
+            let root = PathBuf::from(&dir);
+            // CLAW_SESSIONS_DIR is the root; sessions_control.rs stores sessions in a
+            // workspace-slug subdirectory. Scan subdirs for a workspace-path.txt that
+            // matches our CWD so --resume works correctly.
+            let cwd_str = cwd.to_string_lossy().to_string();
+            if let Ok(entries) = fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let sub = entry.path();
+                    if sub.is_dir() {
+                        let marker = sub.join("workspace-path.txt");
+                        if let Ok(stored) = fs::read_to_string(&marker) {
+                            if stored.trim() == cwd_str.trim() {
+                                return Ok(sub);
+                            }
+                        }
+                    }
+                }
+            }
+            // No matching subdir found — return root so callers can still list/create
+            fs::create_dir_all(&root)?;
+            return Ok(root);
+        }
+    }
     let path = cwd.join(".claw").join("sessions");
     fs::create_dir_all(&path)?;
     Ok(path)
@@ -4148,14 +4182,16 @@ fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error:
 }
 
 fn format_missing_session_reference(reference: &str) -> String {
+    let dir = sessions_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".claw/sessions/".into());
     format!(
-        "session not found: {reference}\nHint: managed sessions live in .claw/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
+        "session not found: {reference}\nHint: managed sessions live in {dir}. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
     )
 }
 
 fn format_no_managed_sessions() -> String {
+    let dir = sessions_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".claw/sessions/".into());
     format!(
-        "no managed sessions found in .claw/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
+        "no managed sessions found in {dir}\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
     )
 }
 

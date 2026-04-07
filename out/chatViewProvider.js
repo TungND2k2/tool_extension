@@ -35,8 +35,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ClawChatViewProvider = void 0;
 const vscode = __importStar(require("vscode"));
-const fs = __importStar(require("fs"));
-const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const tools_1 = require("./tools");
 const sessionStore_1 = require("./sessionStore");
@@ -57,32 +55,20 @@ function extractUserText(stored) {
         return stored;
     return stored.slice(afterCtx + 2).trim();
 }
-/**
- * Ensure ~/.milo has the same sub-directory layout as ~/.claude:
- *   sessions/, projects/, todos/, backups/, debug/, ide/, plugins/, telemetry/
- * All data lives in the user's home directory — never in the workspace.
- */
-function ensureMiloLayout() {
-    const miloDir = path.join(os.homedir(), ".milo");
-    const subdirs = ["sessions", "projects", "todos", "backups", "debug", "ide", "plugins", "telemetry"];
-    try {
-        for (const sub of subdirs) {
-            fs.mkdirSync(path.join(miloDir, sub), { recursive: true });
-        }
-    }
-    catch { /* ignore — read-only fs */ }
-}
 class ClawChatViewProvider {
     extensionUri;
     clawProcess;
     webviewView;
     isGenerating = false;
-    sessionStore = new sessionStore_1.SessionStore();
+    sessionStore;
     /** If true, auto-approve all permission prompts for this session without asking */
     allowAllPermissions = false;
-    constructor(extensionUri, clawProcess) {
+    constructor(extensionUri, clawProcess, globalStorageUri) {
         this.extensionUri = extensionUri;
         this.clawProcess = clawProcess;
+        const sessionsRoot = path.join(globalStorageUri.fsPath, "sessions");
+        this.sessionStore = new sessionStore_1.SessionStore(sessionsRoot);
+        this.clawProcess.setSessionsDir(sessionsRoot);
         // Forward todo updates to the webview in real-time
         (0, tools_1.onTodoUpdate)((todos) => {
             this.webviewView?.webview.postMessage({ type: "todoUpdate", todos });
@@ -95,8 +81,6 @@ class ClawChatViewProvider {
             localResourceRoots: [this.extensionUri],
         };
         webviewView.webview.html = this.getHtml();
-        // Ensure ~/.milo directory layout exists (sessions, projects, todos, etc.)
-        ensureMiloLayout();
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (cwd) {
             this.sessionStore.setWorkspace(cwd);
@@ -153,6 +137,7 @@ class ClawChatViewProvider {
                 id: s.id,
                 preview: s.preview || "New chat",
                 date: new Date(s.updatedAt).toLocaleDateString(),
+                updatedAt: s.updatedAt,
                 messageCount: s.messageCount,
                 active: s.id === currentId,
             })),
@@ -402,28 +387,60 @@ body {
   font-size: 15px; padding: 3px 7px; border-radius: var(--rs); flex-shrink: 0;
 }
 .tp-close:hover { background: var(--vscode-list-hoverBackground); color: var(--fg); }
-#threadList { flex: 1; overflow-y: auto; padding: 6px; }
+
+/* ── Thread search bar ── */
+.tp-search-wrap {
+  padding: 8px 10px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.tp-search {
+  width: 100%; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--rs); padding: 5px 10px;
+  color: var(--fg); font-family: var(--vscode-font-family); font-size: 12px;
+  outline: none; box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.tp-search:focus { border-color: var(--accent); }
+.tp-search::placeholder { color: var(--fg2); }
+
+/* ── Thread group labels (Today / Older) ── */
+.tg-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  color: var(--fg2); padding: 8px 12px 3px; position: sticky; top: 0;
+  background: var(--bg); z-index: 1;
+}
+
+#threadList { flex: 1; overflow-y: auto; padding: 4px 6px 6px; }
 .tl-empty {
   text-align: center; padding: 32px 16px; color: var(--fg2); font-size: 12px;
 }
 .tl-empty-icon { font-size: 28px; margin-bottom: 8px; opacity: 0.5; }
 .tl-empty-sub { font-size: 11px; margin-top: 4px; opacity: 0.7; }
 .thread-item {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: flex-start; gap: 8px;
   padding: 8px 10px; border-radius: var(--r);
-  cursor: pointer; border: 1px solid transparent; margin-bottom: 2px;
+  cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--accent) 8%, transparent);
+  margin-bottom: 1px; position: relative;
 }
-.thread-item:hover { background: var(--vscode-list-hoverBackground); border-color: var(--border); }
-.thread-item.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--accent); }
+.thread-item:hover { background: var(--vscode-list-hoverBackground); }
+.thread-item.active { background: var(--vscode-list-activeSelectionBackground); }
+.thread-item.active .ti-preview { color: var(--vscode-list-activeSelectionForeground, var(--fg)); }
 .ti-main { flex: 1; min-width: 0; }
-.ti-preview { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
-.ti-meta { font-size: 10px; color: var(--fg2); margin-top: 2px; }
+.ti-preview {
+  font-size: 12px; font-weight: 500;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; color: var(--fg); line-height: 1.45;
+}
+.ti-meta { font-size: 10px; color: var(--fg2); margin-top: 3px; }
+.ti-actions {
+  display: flex; gap: 2px; opacity: 0; flex-shrink: 0; align-self: center;
+  transition: opacity 0.12s;
+}
+.thread-item:hover .ti-actions { opacity: 1; }
 .ti-delete {
   background: none; border: none; color: var(--fg2); cursor: pointer;
-  font-size: 12px; padding: 3px 6px; border-radius: var(--rs); opacity: 0; flex-shrink: 0;
+  font-size: 12px; padding: 3px 6px; border-radius: var(--rs);
 }
-.thread-item:hover .ti-delete { opacity: 1; }
-.ti-delete:hover { color: var(--red); }
+.ti-delete:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
 
 /* ── Chat messages area ── */
 #chat { flex: 1; overflow-y: auto; padding: 16px 12px; scroll-behavior: smooth; }
@@ -587,6 +604,64 @@ body {
 .tool-output-ok pre { color: var(--fg); }
 .tool-output-err pre { color: var(--red); }
 
+/* ── Tool file metadata (specialized headers) ── */
+.tool-file-meta { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.tool-action-label { font-size: 11px; font-weight: 600; color: var(--fg); line-height: 1.2; }
+.tool-fp {
+  font-size: 10.5px; color: var(--fg2); font-family: var(--vscode-editor-font-family);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.tool-cmd-preview { font-family: var(--vscode-editor-font-family); font-size: 11.5px; font-weight: 500; }
+.tool-pattern {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
+  font-family: var(--vscode-editor-font-family); max-width: 160px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0;
+}
+.tool-generic-input { margin: 0; padding: 7px 10px; font-size: 11px; color: var(--fg2); }
+
+/* ── Diff view (for file write/edit tools) ── */
+.diff-view {
+  font-family: var(--vscode-editor-font-family); font-size: 11px;
+  line-height: 1.5; max-height: 220px; overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+.diff-line { display: flex; align-items: stretch; }
+.diff-sym {
+  width: 18px; min-width: 18px; text-align: center; font-weight: 700;
+  flex-shrink: 0; padding: 0.5px 0; user-select: none;
+}
+.diff-code { flex: 1; padding: 0.5px 6px; white-space: pre-wrap; word-break: break-all; }
+.diff-add { background: color-mix(in srgb, var(--green) 10%, transparent); }
+.diff-add .diff-sym { color: var(--green); }
+.diff-del { background: color-mix(in srgb, var(--red) 10%, transparent); }
+.diff-del .diff-sym { color: var(--red); }
+.diff-truncated {
+  font-size: 10px; color: var(--fg2); padding: 4px 10px; letter-spacing: 0.2px;
+  border-top: 1px solid var(--border); background: var(--bg2);
+}
+
+/* ── Bash command and output ── */
+.bash-cmd-wrap { background: var(--bg3); border-top: 1px solid var(--border); }
+.bash-cmd {
+  margin: 0; padding: 8px 12px; font-size: 11.5px; color: var(--fg);
+  background: transparent; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--vscode-editor-font-family); max-height: 100px; overflow-y: auto;
+}
+.bash-output {
+  margin: 0; padding: 7px 10px; font-size: 11px; color: var(--fg);
+  font-family: var(--vscode-editor-font-family); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all;
+}
+.bash-output-clamp { max-height: 200px; overflow: hidden; }
+.show-more-btn {
+  display: block; width: 100%; background: none; border: none;
+  border-top: 1px solid var(--border); color: var(--accent); cursor: pointer;
+  font-size: 11px; padding: 4px 10px; text-align: left;
+  font-family: var(--vscode-font-family);
+}
+.show-more-btn:hover { background: var(--vscode-list-hoverBackground); }
+
 /* ── Thinking block ── */
 .thinking-block {
   margin: 3px 0 3px 29px; border-radius: var(--r);
@@ -729,6 +804,9 @@ body {
       <span class="tp-project" id="tp-project-name"></span>
     </div>
     <button class="tp-close" id="closeThreads">&#10005;</button>
+  </div>
+  <div class="tp-search-wrap">
+    <input class="tp-search" id="threadSearch" type="text" placeholder="&#128269; Search history...">
   </div>
   <div id="threadList"></div>
 </div>

@@ -2,7 +2,7 @@
   "name": "milo-code",
   "displayName": "Milo Code",
   "description": "AI coding agent powered by Gemma 4 — self-hosted Claude Code alternative",
-  "version": "0.6.7",
+  "version": "0.6.9",
   "publisher": "inferx",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/inferx/milo-code" },

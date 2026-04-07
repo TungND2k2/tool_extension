@@ -41,7 +41,7 @@ const clawProcess_1 = require("./clawProcess");
 let chatProvider;
 function activate(context) {
     const clawProcess = new clawProcess_1.ClawProcess();
-    chatProvider = new chatViewProvider_1.ClawChatViewProvider(context.extensionUri, clawProcess);
+    chatProvider = new chatViewProvider_1.ClawChatViewProvider(context.extensionUri, clawProcess, context.globalStorageUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("milo-code.chatView", chatProvider, { webviewOptions: { retainContextWhenHidden: true } }));
     context.subscriptions.push(vscode.commands.registerCommand("milo-code.newChat", () => {
         chatProvider.newChat();

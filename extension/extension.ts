@@ -6,7 +6,7 @@ let chatProvider: ClawChatViewProvider;
 
 export function activate(context: vscode.ExtensionContext) {
   const clawProcess = new ClawProcess();
-  chatProvider = new ClawChatViewProvider(context.extensionUri, clawProcess);
+  chatProvider = new ClawChatViewProvider(context.extensionUri, clawProcess, context.globalStorageUri);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

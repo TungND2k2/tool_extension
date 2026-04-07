@@ -49,47 +49,8 @@ function extractUserTextFromBlocks(blocks: RustBlock[]): string {
   return afterCtx === -1 ? raw : raw.slice(afterCtx + 2).trim();
 }
 
-// ── ~/.milo/sessions/ — central session storage (never inside the workspace) ──
-const MILO_DIR = path.join(os.homedir(), ".milo");
-const MILO_SESSIONS_DIR = path.join(MILO_DIR, "sessions");
-
-/**
- * Find the session directory for a workspace by scanning for workspace-path.txt files.
- * The Rust binary writes `workspace-path.txt` inside each slug dir when it creates it,
- * so TypeScript doesn't need to replicate the Rust hash algorithm.
- * Falls back to creating a new dir using a simple slug if Rust hasn't run yet.
- */
-function miloSessionsDir(workspaceAbsPath: string): string {
-  try { fs.mkdirSync(MILO_SESSIONS_DIR, { recursive: true }); } catch { /* ignore */ }
-
-  // Try to find an existing slug dir that Rust already created for this workspace
-  try {
-    for (const slug of fs.readdirSync(MILO_SESSIONS_DIR)) {
-      const slugDir = path.join(MILO_SESSIONS_DIR, slug);
-      if (!fs.statSync(slugDir).isDirectory()) continue;
-      const marker = path.join(slugDir, "workspace-path.txt");
-      if (fs.existsSync(marker)) {
-        const stored = fs.readFileSync(marker, "utf-8").trim();
-        if (stored === workspaceAbsPath) return slugDir;
-      }
-    }
-  } catch { /* ignore */ }
-
-  // Rust hasn't created one yet — create a placeholder dir and write the marker
-  // so Rust can find it (Rust checks for existing dirs before creating new ones).
-  const name = path.basename(workspaceAbsPath);
-  // Use a simple counter-based slug to avoid hash algorithm mismatches
-  const slug = `${name}-ts`;
-  const dir = path.join(MILO_SESSIONS_DIR, slug);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const marker = path.join(dir, "workspace-path.txt");
-    if (!fs.existsSync(marker)) {
-      fs.writeFileSync(marker, workspaceAbsPath);
-    }
-  } catch { /* ignore */ }
-  return dir;
-}
+// ── Default fallback when VS Code globalStorageUri is not available ──
+const DEFAULT_SESSIONS_ROOT = path.join(os.homedir(), ".milo", "sessions");
 
 
 // ── Public types ──
@@ -105,22 +66,54 @@ export interface SessionMeta {
   workspaceName: string;
 }
 
-// ── SessionStore — reads Rust binary sessions from ~/.milo/sessions/<workspace-slug>/ ──
+// ── SessionStore — reads Rust binary sessions from <sessionsRoot>/<workspace-slug>/ ──
 
 export class SessionStore {
+  private readonly sessionsRoot: string;
   private workspaceDir: string | null = null;
   private currentSessionId: string | null = null;
+
+  constructor(sessionsRootDir?: string) {
+    this.sessionsRoot = sessionsRootDir ?? DEFAULT_SESSIONS_ROOT;
+    try { fs.mkdirSync(this.sessionsRoot, { recursive: true }); } catch { /* ignore */ }
+  }
+
+  private workspaceSessionsDir(workspaceAbsPath: string): string {
+    try { fs.mkdirSync(this.sessionsRoot, { recursive: true }); } catch { /* ignore */ }
+
+    // Try to find an existing slug dir that Rust already created for this workspace
+    try {
+      for (const slug of fs.readdirSync(this.sessionsRoot)) {
+        const slugDir = path.join(this.sessionsRoot, slug);
+        if (!fs.statSync(slugDir).isDirectory()) continue;
+        const marker = path.join(slugDir, "workspace-path.txt");
+        if (fs.existsSync(marker)) {
+          const stored = fs.readFileSync(marker, "utf-8").trim();
+          if (stored === workspaceAbsPath) return slugDir;
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Not found — create a placeholder dir so Rust can find it
+    const name = path.basename(workspaceAbsPath);
+    const slug = `${name}-ts`;
+    const dir = path.join(this.sessionsRoot, slug);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const marker = path.join(dir, "workspace-path.txt");
+      if (!fs.existsSync(marker)) fs.writeFileSync(marker, workspaceAbsPath);
+    } catch { /* ignore */ }
+    return dir;
+  }
 
   setWorkspace(dir: string): void {
     this.workspaceDir = dir;
     this.currentSessionId = null;
-    // Ensure the sessions dir exists for this workspace
-    miloSessionsDir(dir);
+    this.workspaceSessionsDir(dir);
   }
 
   private sessionsDir(): string {
-    const base = this.workspaceDir ?? process.cwd();
-    return miloSessionsDir(base);
+    return this.workspaceSessionsDir(this.workspaceDir ?? process.cwd());
   }
 
   getCurrentSessionId(): string | null {
@@ -200,7 +193,7 @@ export class SessionStore {
       const sep = sessionId.indexOf("::");
       const slug = sessionId.slice(0, sep);
       const sid = sessionId.slice(sep + 2);
-      return path.join(MILO_SESSIONS_DIR, slug, `${sid}.jsonl`);
+      return path.join(this.sessionsRoot, slug, `${sid}.jsonl`);
     }
     return path.join(this.sessionsDir(), `${sessionId}.jsonl`);
   }

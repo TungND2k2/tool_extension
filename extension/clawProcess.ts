@@ -52,6 +52,12 @@ export class ClawProcess {
   private proc: cp.ChildProcess | null = null;
   private hasSession = false;
   private binaryReady = false; // cached after first successful ensureInstalled
+  private sessionsDir: string | null = null;
+
+  /** Called by ChatViewProvider with context.globalStorageUri/sessions path */
+  setSessionsDir(dir: string): void {
+    this.sessionsDir = dir;
+  }
 
   resetSession() {
     this.hasSession = false;
@@ -241,11 +247,15 @@ export class ClawProcess {
     const apiKey = config.get<string>("apiKey", "");
     const baseUrl = config.get<string>("baseUrl", "https://api.inferx.x-or.cloud");
 
-    return {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       ANTHROPIC_API_KEY: apiKey,
       ANTHROPIC_BASE_URL: baseUrl,
     };
+    if (this.sessionsDir) {
+      env.CLAW_SESSIONS_DIR = this.sessionsDir;
+    }
+    return env;
   }
 
   private getArgs(prompt: string): string[] {
