@@ -122,6 +122,24 @@ pub struct AutoCompactionEvent {
     pub removed_message_count: usize,
 }
 
+/// Progress events emitted during a turn for real-time UI updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnProgress {
+    /// Model is generating text
+    TextDelta(String),
+    /// Model requested a tool call
+    ToolStart { name: String, input: String },
+    /// Tool execution finished
+    ToolDone { name: String, output: String, is_error: bool },
+    /// One iteration (API call) completed
+    IterationDone { iteration: usize },
+}
+
+/// Callback for reporting progress during a turn.
+pub trait TurnProgressReporter {
+    fn report(&mut self, event: &TurnProgress);
+}
+
 /// Coordinates the model loop, tool execution, hooks, and session updates.
 pub struct ConversationRuntime<C, T> {
     session: Session,
@@ -136,6 +154,7 @@ pub struct ConversationRuntime<C, T> {
     hook_abort_signal: HookAbortSignal,
     hook_progress_reporter: Option<Box<dyn HookProgressReporter>>,
     session_tracer: Option<SessionTracer>,
+    turn_progress_reporter: Option<Box<dyn TurnProgressReporter>>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -185,6 +204,7 @@ where
             hook_abort_signal: HookAbortSignal::default(),
             hook_progress_reporter: None,
             session_tracer: None,
+            turn_progress_reporter: None,
         }
     }
 
@@ -219,6 +239,21 @@ where
     pub fn with_session_tracer(mut self, session_tracer: SessionTracer) -> Self {
         self.session_tracer = Some(session_tracer);
         self
+    }
+
+    #[must_use]
+    pub fn with_turn_progress_reporter(
+        mut self,
+        reporter: Box<dyn TurnProgressReporter>,
+    ) -> Self {
+        self.turn_progress_reporter = Some(reporter);
+        self
+    }
+
+    fn report_progress(&mut self, event: &TurnProgress) {
+        if let Some(reporter) = self.turn_progress_reporter.as_mut() {
+            reporter.report(event);
+        }
     }
 
     fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
@@ -330,6 +365,12 @@ where
                     return Err(error);
                 }
             };
+            // Report text deltas for real-time streaming
+            for event in &events {
+                if let AssistantEvent::TextDelta(text) = event {
+                    self.report_progress(&TurnProgress::TextDelta(text.clone()));
+                }
+            }
             let (assistant_message, usage, turn_prompt_cache_events) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
@@ -368,6 +409,11 @@ where
             }
 
             for (tool_use_id, tool_name, input) in pending_tool_uses {
+                let tool_name_for_progress = tool_name.clone();
+                self.report_progress(&TurnProgress::ToolStart {
+                    name: tool_name_for_progress.clone(),
+                    input: input.clone(),
+                });
                 let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
                 let effective_input = pre_hook_result
                     .updated_input()
@@ -461,6 +507,23 @@ where
                         true,
                     ),
                 };
+                // Report tool completion
+                let (tool_output, tool_is_error) = match &result_message.blocks.first() {
+                    Some(ContentBlock::ToolResult { output, is_error, .. }) => {
+                        (output.clone(), *is_error)
+                    }
+                    _ => (String::new(), false),
+                };
+                self.report_progress(&TurnProgress::ToolDone {
+                    name: tool_name_for_progress,
+                    output: if tool_output.len() > 500 {
+                        format!("{}...", &tool_output[..500])
+                    } else {
+                        tool_output
+                    },
+                    is_error: tool_is_error,
+                });
+
                 self.session
                     .push_message(result_message.clone())
                     .map_err(|error| RuntimeError::new(error.to_string()))?;

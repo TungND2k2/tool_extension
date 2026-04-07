@@ -49,11 +49,42 @@ use runtime::{
     ConversationMessage, ConversationRuntime, McpServerManager, McpTool, MessageRole, ModelPricing,
     OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest, PermissionMode,
     PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    Session, TokenUsage, ToolError, ToolExecutor, TurnProgress, TurnProgressReporter,
+    UsageTracker,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tools::{GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput};
+
+/// Writes JSON progress events to stderr for extensions to read in real-time.
+struct StderrProgressReporter;
+
+impl TurnProgressReporter for StderrProgressReporter {
+    fn report(&mut self, event: &TurnProgress) {
+        let json_event = match event {
+            TurnProgress::TextDelta(text) => json!({
+                "event": "text_delta",
+                "text": text,
+            }),
+            TurnProgress::ToolStart { name, input } => json!({
+                "event": "tool_start",
+                "name": name,
+                "input": input,
+            }),
+            TurnProgress::ToolDone { name, output, is_error } => json!({
+                "event": "tool_done",
+                "name": name,
+                "output": output,
+                "is_error": is_error,
+            }),
+            TurnProgress::IterationDone { iteration } => json!({
+                "event": "iteration_done",
+                "iteration": iteration,
+            }),
+        };
+        let _ = eprintln!("{}", json_event);
+    }
+}
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
@@ -2557,6 +2588,15 @@ impl BuiltRuntime {
         self
     }
 
+    fn with_turn_progress_reporter(mut self, reporter: Box<dyn TurnProgressReporter>) -> Self {
+        let runtime = self
+            .runtime
+            .take()
+            .expect("runtime should exist before installing progress reporter");
+        self.runtime = Some(runtime.with_turn_progress_reporter(reporter));
+        self
+    }
+
     fn shutdown_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.plugins_active {
             self.plugin_registry.shutdown()?;
@@ -3152,7 +3192,8 @@ impl LiveCli {
     }
 
     fn run_prompt_json(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
+        let (runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
+        let mut runtime = runtime.with_turn_progress_reporter(Box::new(StderrProgressReporter));
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = runtime.run_turn(input, Some(&mut permission_prompter));
         hook_abort_monitor.stop();
