@@ -83,7 +83,7 @@ export class ClawProcess {
   }
 
   // Expected minimum version — bump this together with deploying a new binary to force auto-update
-  private static readonly MIN_VERSION = "0.1.0";
+  private static readonly MIN_VERSION = "0.2.0";
 
   private getBinaryVersion(binaryPath: string): string | null {
     try {

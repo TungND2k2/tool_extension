@@ -53,127 +53,136 @@ function extractUserTextFromBlocks(blocks) {
     const afterCtx = raw.indexOf("\n\n", idx + marker.length);
     return afterCtx === -1 ? raw : raw.slice(afterCtx + 2).trim();
 }
-// ── Workspace registry — persists all known workspaces in ~/.milo/workspaces.json ──
+// ── ~/.milo/sessions/ — central session storage (never inside the workspace) ──
 const MILO_DIR = path.join(os.homedir(), ".milo");
-const WORKSPACES_FILE = path.join(MILO_DIR, "workspaces.json");
-function registerWorkspace(dir) {
-    let list = [];
+const MILO_SESSIONS_DIR = path.join(MILO_DIR, "sessions");
+/**
+ * Find the session directory for a workspace by scanning for workspace-path.txt files.
+ * The Rust binary writes `workspace-path.txt` inside each slug dir when it creates it,
+ * so TypeScript doesn't need to replicate the Rust hash algorithm.
+ * Falls back to creating a new dir using a simple slug if Rust hasn't run yet.
+ */
+function miloSessionsDir(workspaceAbsPath) {
     try {
-        if (fs.existsSync(WORKSPACES_FILE)) {
-            list = JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8"));
+        fs.mkdirSync(MILO_SESSIONS_DIR, { recursive: true });
+    }
+    catch { /* ignore */ }
+    // Try to find an existing slug dir that Rust already created for this workspace
+    try {
+        for (const slug of fs.readdirSync(MILO_SESSIONS_DIR)) {
+            const slugDir = path.join(MILO_SESSIONS_DIR, slug);
+            if (!fs.statSync(slugDir).isDirectory())
+                continue;
+            const marker = path.join(slugDir, "workspace-path.txt");
+            if (fs.existsSync(marker)) {
+                const stored = fs.readFileSync(marker, "utf-8").trim();
+                if (stored === workspaceAbsPath)
+                    return slugDir;
+            }
         }
     }
     catch { /* ignore */ }
-    const idx = list.indexOf(dir);
-    if (idx !== -1)
-        list.splice(idx, 1);
-    list.unshift(dir); // Most recent first
-    list = list.slice(0, 50);
+    // Rust hasn't created one yet — create a placeholder dir and write the marker
+    // so Rust can find it (Rust checks for existing dirs before creating new ones).
+    const name = path.basename(workspaceAbsPath);
+    // Use a simple counter-based slug to avoid hash algorithm mismatches
+    const slug = `${name}-ts`;
+    const dir = path.join(MILO_SESSIONS_DIR, slug);
     try {
-        if (!fs.existsSync(MILO_DIR))
-            fs.mkdirSync(MILO_DIR, { recursive: true });
-        fs.writeFileSync(WORKSPACES_FILE, JSON.stringify(list, null, 2));
-    }
-    catch { /* ignore */ }
-}
-function getRegisteredWorkspaces() {
-    try {
-        if (fs.existsSync(WORKSPACES_FILE)) {
-            return JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8"))
-                .filter((d) => fs.existsSync(d));
+        fs.mkdirSync(dir, { recursive: true });
+        const marker = path.join(dir, "workspace-path.txt");
+        if (!fs.existsSync(marker)) {
+            fs.writeFileSync(marker, workspaceAbsPath);
         }
     }
     catch { /* ignore */ }
-    return [];
+    return dir;
 }
-// ── SessionStore — reads Rust binary sessions from <workspace>/.claw/sessions/ ──
+// ── SessionStore — reads Rust binary sessions from ~/.milo/sessions/<workspace-slug>/ ──
 class SessionStore {
     workspaceDir = null;
     currentSessionId = null;
     setWorkspace(dir) {
         this.workspaceDir = dir;
         this.currentSessionId = null;
-        registerWorkspace(dir);
+        // Ensure the sessions dir exists for this workspace
+        miloSessionsDir(dir);
     }
     sessionsDir() {
-        if (this.workspaceDir) {
-            return path.join(this.workspaceDir, ".claw", "sessions");
-        }
-        // Fallback — try to find via cwd
-        return path.join(process.cwd(), ".claw", "sessions");
+        const base = this.workspaceDir ?? process.cwd();
+        return miloSessionsDir(base);
     }
     getCurrentSessionId() {
         return this.currentSessionId;
     }
-    /** List all sessions from all known workspaces, newest first */
+    /**
+     * List sessions for the CURRENT workspace only, newest first.
+     * Like Claude: each project has its own isolated chat history.
+     */
     listSessions() {
-        // Always include current workspace + all registered ones
-        const allWorkspaces = getRegisteredWorkspaces();
-        if (this.workspaceDir && !allWorkspaces.includes(this.workspaceDir)) {
-            allWorkspaces.unshift(this.workspaceDir);
-        }
-        const allSessions = [];
-        for (const wsDir of allWorkspaces) {
-            const dir = path.join(wsDir, ".claw", "sessions");
-            if (!fs.existsSync(dir))
-                continue;
-            const workspaceName = path.basename(wsDir);
-            const files = fs.readdirSync(dir)
-                .filter((f) => f.endsWith(".jsonl"))
-                .sort()
-                .reverse();
-            for (const f of files) {
-                const filePath = path.join(dir, f);
-                const stat = fs.statSync(filePath);
-                const id = `${wsDir}::${f.replace(".jsonl", "")}`; // unique across workspaces
-                let preview = "";
-                let messageCount = 0;
-                let createdMs = stat.birthtimeMs;
-                let updatedMs = stat.mtimeMs;
-                try {
-                    for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
-                        if (!line.trim())
-                            continue;
-                        const entry = JSON.parse(line);
-                        if (entry.type === "session_meta") {
-                            const m = entry;
-                            createdMs = m.created_at_ms;
-                            updatedMs = m.updated_at_ms;
-                        }
-                        else if (entry.type === "message") {
-                            const msg = entry.message;
-                            messageCount++;
-                            if (!preview && msg.role === "user") {
-                                preview = extractUserTextFromBlocks(msg.blocks).slice(0, 80);
-                            }
+        const dir = this.sessionsDir();
+        const workspacePath = this.workspaceDir ?? process.cwd();
+        const workspaceName = path.basename(workspacePath);
+        if (!fs.existsSync(dir))
+            return [];
+        const sessions = [];
+        const files = fs.readdirSync(dir)
+            .filter((f) => f.endsWith(".jsonl"))
+            .sort()
+            .reverse();
+        for (const f of files) {
+            const filePath = path.join(dir, f);
+            const stat = fs.statSync(filePath);
+            const sessionId = f.replace(".jsonl", "");
+            // slug is derived from the dir name (last path segment)
+            const slug = path.basename(dir);
+            const id = `${slug}::${sessionId}`;
+            let preview = "";
+            let messageCount = 0;
+            let createdMs = stat.birthtimeMs;
+            let updatedMs = stat.mtimeMs;
+            try {
+                for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+                    if (!line.trim())
+                        continue;
+                    const entry = JSON.parse(line);
+                    if (entry.type === "session_meta") {
+                        const m = entry;
+                        createdMs = m.created_at_ms;
+                        updatedMs = m.updated_at_ms;
+                    }
+                    else if (entry.type === "message") {
+                        const msg = entry.message;
+                        messageCount++;
+                        if (!preview && msg.role === "user") {
+                            preview = extractUserTextFromBlocks(msg.blocks).slice(0, 80);
                         }
                     }
                 }
-                catch { /* ignore */ }
-                if (messageCount === 0)
-                    continue;
-                allSessions.push({
-                    id,
-                    createdAt: new Date(createdMs).toISOString(),
-                    updatedAt: new Date(updatedMs).toISOString(),
-                    messageCount,
-                    preview,
-                    filePath,
-                    workspacePath: wsDir,
-                    workspaceName,
-                });
             }
+            catch { /* ignore */ }
+            if (messageCount === 0)
+                continue;
+            sessions.push({
+                id,
+                createdAt: new Date(createdMs).toISOString(),
+                updatedAt: new Date(updatedMs).toISOString(),
+                messageCount,
+                preview,
+                filePath,
+                workspacePath,
+                workspaceName,
+            });
         }
-        // Sort all sessions newest first
-        return allSessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+        return sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     }
-    /** Resolve filePath from composite id (wsDir::sessionId) or plain sessionId */
+    /** Resolve filePath from composite id (slug::sessionId) or plain sessionId */
     resolveFilePath(sessionId) {
         if (sessionId.includes("::")) {
             const sep = sessionId.indexOf("::");
-            const wsDir = sessionId.slice(0, sep);
+            const slug = sessionId.slice(0, sep);
             const sid = sessionId.slice(sep + 2);
-            return path.join(wsDir, ".claw", "sessions", `${sid}.jsonl`);
+            return path.join(MILO_SESSIONS_DIR, slug, `${sid}.jsonl`);
         }
         return path.join(this.sessionsDir(), `${sessionId}.jsonl`);
     }

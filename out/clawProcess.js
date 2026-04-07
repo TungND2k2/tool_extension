@@ -66,6 +66,7 @@ function getDownloadFileName() {
 class ClawProcess {
     proc = null;
     hasSession = false;
+    binaryReady = false; // cached after first successful ensureInstalled
     resetSession() {
         this.hasSession = false;
     }
@@ -91,7 +92,7 @@ class ClawProcess {
         return `${baseUrl}/downloads/${fileName}`;
     }
     // Expected minimum version — bump this together with deploying a new binary to force auto-update
-    static MIN_VERSION = "0.1.1";
+    static MIN_VERSION = "0.2.0";
     getBinaryVersion(binaryPath) {
         try {
             const out = cp.execSync(`"${binaryPath}" --version 2>&1`, { encoding: "utf-8", timeout: 5000 });
@@ -129,6 +130,8 @@ class ClawProcess {
         }
     }
     async ensureInstalled(onEvent) {
+        if (this.binaryReady)
+            return true; // already verified this session
         const destPath = path.join(BIN_DIR, getClawBinaryName());
         // Check if binary needs update
         if (fs.existsSync(destPath)) {
@@ -141,10 +144,12 @@ class ClawProcess {
                 catch { /* ignore */ }
             }
             else {
+                this.binaryReady = true;
                 return true; // up to date
             }
         }
         else if (this.isInstalled()) {
+            this.binaryReady = true;
             return true; // system PATH binary, skip version check
         }
         else {
@@ -175,6 +180,7 @@ class ClawProcess {
             catch {
                 onEvent({ type: "downloading", text: "Installed successfully", progress: 100 });
             }
+            this.binaryReady = true;
             return true;
         }
         catch (err) {
@@ -239,12 +245,11 @@ class ClawProcess {
     getArgs(prompt) {
         const config = vscode.workspace.getConfiguration("miloCode");
         const model = config.get("model", "gemma4");
-        const permissionMode = config.get("permissionMode", "workspace-write");
+        const permissionMode = config.get("permissionMode", "default");
         const args = [
             "--model", model,
             "--output-format", "json",
             "--permission-mode", permissionMode,
-            "--dangerously-skip-permissions",
         ];
         // Resume previous session for conversation continuity
         if (this.hasSession) {
@@ -252,6 +257,12 @@ class ClawProcess {
         }
         args.push(prompt);
         return args;
+    }
+    /** Send permission response ('y' = allow, 'n' = deny) to the running binary via stdin. */
+    sendPermissionResponse(allow) {
+        if (this.proc?.stdin && !this.proc.stdin.destroyed) {
+            this.proc.stdin.write(allow ? "y\n" : "n\n");
+        }
     }
     isConfigured() {
         const config = vscode.workspace.getConfiguration("miloCode");
@@ -275,8 +286,7 @@ class ClawProcess {
                 env,
                 stdio: ["pipe", "pipe", "pipe"],
             });
-            // Close stdin immediately — binary must not wait for user input
-            this.proc.stdin?.end();
+            // Keep stdin open so we can write permission responses later
             this.proc.stdout?.on("data", (data) => {
                 stdout += data.toString();
             });
@@ -294,6 +304,9 @@ class ClawProcess {
                     }
                     else if (evt.event === "tool_done") {
                         onEvent({ type: "tool_done", toolName: evt.name, toolOutput: evt.output, toolIsError: evt.is_error });
+                    }
+                    else if (evt.event === "permission_prompt") {
+                        onEvent({ type: "permission_prompt", permissionName: evt.name, permissionInput: evt.input ?? evt.command ?? "" });
                     }
                 }
                 catch {

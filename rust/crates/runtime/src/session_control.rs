@@ -108,9 +108,34 @@ pub fn managed_sessions_dir_for(
     base_dir: impl AsRef<Path>,
 ) -> Result<PathBuf, SessionControlError> {
     let base = base_dir.as_ref().canonicalize().unwrap_or_else(|_| base_dir.as_ref().to_path_buf());
+    let sessions_root = milo_sessions_root()?;
+    let base_str = base.to_string_lossy();
+
+    // First: scan for an existing slug dir that already has a matching workspace-path.txt.
+    // This lets TypeScript-created dirs and Rust-created dirs find each other regardless
+    // of which hash algorithm each side would otherwise use.
+    if let Ok(entries) = fs::read_dir(&sessions_root) {
+        for entry in entries.flatten() {
+            let slug_dir = entry.path();
+            if !slug_dir.is_dir() { continue; }
+            let marker = slug_dir.join("workspace-path.txt");
+            if let Ok(stored) = fs::read_to_string(&marker) {
+                if stored.trim() == base_str {
+                    return Ok(slug_dir);
+                }
+            }
+        }
+    }
+
+    // No existing dir found — create a new one with our hash-based slug.
     let slug = workspace_slug(&base);
-    let path = milo_sessions_root()?.join(slug);
+    let path = sessions_root.join(slug);
     fs::create_dir_all(&path)?;
+    // Write workspace-path.txt so future scans (by Rust or TypeScript) can find this dir.
+    let marker = path.join("workspace-path.txt");
+    if !marker.exists() {
+        let _ = fs::write(&marker, base_str.as_bytes());
+    }
     Ok(path)
 }
 

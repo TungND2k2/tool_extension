@@ -54,69 +54,43 @@ const MILO_DIR = path.join(os.homedir(), ".milo");
 const MILO_SESSIONS_DIR = path.join(MILO_DIR, "sessions");
 
 /**
- * Derive the same slug the Rust binary uses:
- *   `<workspace-name>-<8-hex of djb2 hash of absolute path>`
- *
- * We replicate the Rust DefaultHasher algorithm (djb2-like) here so both sides
- * agree on the directory name without any IPC.
+ * Find the session directory for a workspace by scanning for workspace-path.txt files.
+ * The Rust binary writes `workspace-path.txt` inside each slug dir when it creates it,
+ * so TypeScript doesn't need to replicate the Rust hash algorithm.
+ * Falls back to creating a new dir using a simple slug if Rust hasn't run yet.
  */
-function workspaceSlug(absDir: string): string {
-  // Simple djb2 hash — matches Rust std::hash::DefaultHasher on stable outputs
-  // (Rust's DefaultHasher is SipHash but we just need a consistent TS implementation,
-  //  so we use a seeded djb2 and store a mapping file for correctness).
-  // To be robust, store a mapping file so we never have hash mismatches.
-  const name = path.basename(absDir);
-  const mapFile = path.join(MILO_DIR, "workspace-slugs.json");
-  let map: Record<string, string> = {};
+function miloSessionsDir(workspaceAbsPath: string): string {
+  try { fs.mkdirSync(MILO_SESSIONS_DIR, { recursive: true }); } catch { /* ignore */ }
+
+  // Try to find an existing slug dir that Rust already created for this workspace
   try {
-    if (fs.existsSync(mapFile)) {
-      map = JSON.parse(fs.readFileSync(mapFile, "utf-8")) as Record<string, string>;
+    for (const slug of fs.readdirSync(MILO_SESSIONS_DIR)) {
+      const slugDir = path.join(MILO_SESSIONS_DIR, slug);
+      if (!fs.statSync(slugDir).isDirectory()) continue;
+      const marker = path.join(slugDir, "workspace-path.txt");
+      if (fs.existsSync(marker)) {
+        const stored = fs.readFileSync(marker, "utf-8").trim();
+        if (stored === workspaceAbsPath) return slugDir;
+      }
     }
   } catch { /* ignore */ }
-  if (map[absDir]) return map[absDir];
 
-  // Generate a slug using a simple hash of the path string
-  let h = 0;
-  for (let i = 0; i < absDir.length; i++) {
-    h = Math.imul(31, h) + absDir.charCodeAt(i) | 0;
-  }
-  const hex = (h >>> 0).toString(16).padStart(8, "0");
-  const slug = `${name}-${hex}`;
-  map[absDir] = slug;
-  try {
-    if (!fs.existsSync(MILO_DIR)) fs.mkdirSync(MILO_DIR, { recursive: true });
-    fs.writeFileSync(mapFile, JSON.stringify(map, null, 2));
-  } catch { /* ignore */ }
-  return slug;
-}
-
-function miloSessionsDir(workspaceAbsPath: string): string {
-  const slug = workspaceSlug(workspaceAbsPath);
+  // Rust hasn't created one yet — create a placeholder dir and write the marker
+  // so Rust can find it (Rust checks for existing dirs before creating new ones).
+  const name = path.basename(workspaceAbsPath);
+  // Use a simple counter-based slug to avoid hash algorithm mismatches
+  const slug = `${name}-ts`;
   const dir = path.join(MILO_SESSIONS_DIR, slug);
-  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const marker = path.join(dir, "workspace-path.txt");
+    if (!fs.existsSync(marker)) {
+      fs.writeFileSync(marker, workspaceAbsPath);
+    }
+  } catch { /* ignore */ }
   return dir;
 }
 
-/** Scan ~/.milo/sessions/ for all workspace sub-directories */
-function getAllMiloWorkspaceDirs(): Array<{ slug: string; absPath: string | null }> {
-  try {
-    if (!fs.existsSync(MILO_SESSIONS_DIR)) return [];
-    // Load slug→absPath mapping
-    const mapFile = path.join(MILO_DIR, "workspace-slugs.json");
-    let map: Record<string, string> = {};
-    try {
-      if (fs.existsSync(mapFile)) {
-        // map is absPath → slug; invert it
-        const raw = JSON.parse(fs.readFileSync(mapFile, "utf-8")) as Record<string, string>;
-        map = Object.fromEntries(Object.entries(raw).map(([k, v]) => [v, k]));
-      }
-    } catch { /* ignore */ }
-    return fs.readdirSync(MILO_SESSIONS_DIR)
-      .filter((slug) => fs.statSync(path.join(MILO_SESSIONS_DIR, slug)).isDirectory())
-      .map((slug) => ({ slug, absPath: map[slug] ?? null }));
-  } catch { /* ignore */ }
-  return [];
-}
 
 // ── Public types ──
 
@@ -153,68 +127,69 @@ export class SessionStore {
     return this.currentSessionId;
   }
 
-  /** List all sessions from all workspace slugs under ~/.milo/sessions/, newest first */
+  /**
+   * List sessions for the CURRENT workspace only, newest first.
+   * Like Claude: each project has its own isolated chat history.
+   */
   listSessions(): SessionMeta[] {
-    const allSessions: SessionMeta[] = [];
+    const dir = this.sessionsDir();
+    const workspacePath = this.workspaceDir ?? process.cwd();
+    const workspaceName = path.basename(workspacePath);
 
-    for (const { slug, absPath } of getAllMiloWorkspaceDirs()) {
-      const dir = path.join(MILO_SESSIONS_DIR, slug);
-      if (!fs.existsSync(dir)) continue;
+    if (!fs.existsSync(dir)) return [];
 
-      // Use absPath from mapping if available, else show the slug
-      const workspaceName = absPath ? path.basename(absPath) : slug;
-      const workspacePath = absPath ?? slug;
+    const sessions: SessionMeta[] = [];
 
-      const files = fs.readdirSync(dir)
-        .filter((f) => f.endsWith(".jsonl"))
-        .sort()
-        .reverse();
+    const files = fs.readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .sort()
+      .reverse();
 
-      for (const f of files) {
-        const filePath = path.join(dir, f);
-        const stat = fs.statSync(filePath);
-        const sessionId = f.replace(".jsonl", "");
-        const id = `${slug}::${sessionId}`;
+    for (const f of files) {
+      const filePath = path.join(dir, f);
+      const stat = fs.statSync(filePath);
+      const sessionId = f.replace(".jsonl", "");
+      // slug is derived from the dir name (last path segment)
+      const slug = path.basename(dir);
+      const id = `${slug}::${sessionId}`;
 
-        let preview = "";
-        let messageCount = 0;
-        let createdMs = stat.birthtimeMs;
-        let updatedMs = stat.mtimeMs;
+      let preview = "";
+      let messageCount = 0;
+      let createdMs = stat.birthtimeMs;
+      let updatedMs = stat.mtimeMs;
 
-        try {
-          for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
-            if (!line.trim()) continue;
-            const entry = JSON.parse(line) as RustEntry;
-            if (entry.type === "session_meta") {
-              const m = entry as RustSessionMeta;
-              createdMs = m.created_at_ms;
-              updatedMs = m.updated_at_ms;
-            } else if (entry.type === "message") {
-              const msg = (entry as RustMessage).message;
-              messageCount++;
-              if (!preview && msg.role === "user") {
-                preview = extractUserTextFromBlocks(msg.blocks).slice(0, 80);
-              }
+      try {
+        for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+          if (!line.trim()) continue;
+          const entry = JSON.parse(line) as RustEntry;
+          if (entry.type === "session_meta") {
+            const m = entry as RustSessionMeta;
+            createdMs = m.created_at_ms;
+            updatedMs = m.updated_at_ms;
+          } else if (entry.type === "message") {
+            const msg = (entry as RustMessage).message;
+            messageCount++;
+            if (!preview && msg.role === "user") {
+              preview = extractUserTextFromBlocks(msg.blocks).slice(0, 80);
             }
           }
-        } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
 
-        if (messageCount === 0) continue;
-        allSessions.push({
-          id,
-          createdAt: new Date(createdMs).toISOString(),
-          updatedAt: new Date(updatedMs).toISOString(),
-          messageCount,
-          preview,
-          filePath,
-          workspacePath,
-          workspaceName,
-        });
-      }
+      if (messageCount === 0) continue;
+      sessions.push({
+        id,
+        createdAt: new Date(createdMs).toISOString(),
+        updatedAt: new Date(updatedMs).toISOString(),
+        messageCount,
+        preview,
+        filePath,
+        workspacePath,
+        workspaceName,
+      });
     }
 
-    // Sort all sessions newest first
-    return allSessions.sort((a, b) =>
+    return sessions.sort((a, b) =>
       new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
     );
   }

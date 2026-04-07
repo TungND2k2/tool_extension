@@ -101,8 +101,13 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
           this.deleteThread(msg.id);
           break;
         case "permissionResponse":
-          if (msg.answer !== "deny") {
-            // Permission handled internally by claw binary
+          if (msg.answer === "allow_all") {
+            this.allowAllPermissions = true;
+            this.clawProcess.sendPermissionResponse(true);
+          } else if (msg.answer === "allow") {
+            this.clawProcess.sendPermissionResponse(true);
+          } else {
+            this.clawProcess.sendPermissionResponse(false);
           }
           break;
       }
@@ -112,18 +117,17 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
   private sendThreadList() {
     const sessions = this.sessionStore.listSessions();
     const currentId = this.sessionStore.getCurrentSessionId();
-    const currentWs = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+    const wsFolder = vscode.workspace.workspaceFolders?.[0];
+    const projectName = wsFolder ? wsFolder.name : "No project";
     this.webviewView?.webview.postMessage({
       type: "threadList",
-      currentWorkspacePath: currentWs,
+      projectName,
       threads: sessions.map(s => ({
         id: s.id,
         preview: s.preview || "New chat",
         date: new Date(s.updatedAt).toLocaleDateString(),
         messageCount: s.messageCount,
         active: s.id === currentId,
-        workspacePath: s.workspacePath,
-        workspaceName: s.workspaceName,
       })),
     });
   }
@@ -158,6 +162,7 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
   newChat() {
     this.clawProcess.resetSession();
     this.sessionStore.newSession();
+    this.allowAllPermissions = false;
     this.webviewView?.webview.postMessage({ type: "clearChat" });
   }
 
@@ -296,6 +301,19 @@ IMPORTANT RULES:
           this.webviewView?.webview.postMessage({ type: "streamEnd" });
           break;
 
+        case "permission_prompt":
+          if (this.allowAllPermissions) {
+            // Auto-approve without showing UI
+            this.clawProcess.sendPermissionResponse(true);
+          } else {
+            this.webviewView?.webview.postMessage({
+              type: "permissionPrompt",
+              name: evt.permissionName,
+              input: evt.permissionInput,
+            });
+          }
+          break;
+
         case "error":
           this.webviewView?.webview.postMessage({ type: "showError", error: evt.error });
           break;
@@ -347,51 +365,46 @@ body {
 /* ── Thread slide-over panel ── */
 #threadPanel {
   display: none; position: absolute; top: 0; right: 0; bottom: 0; left: 0;
-  background: var(--bg); z-index: 20; flex-direction: column; padding: 0;
+  background: var(--bg); z-index: 20; flex-direction: column;
 }
 #threadPanel.open { display: flex; }
 .tp-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 14px; border-bottom: 1px solid var(--border);
-  font-weight: 600; font-size: 13px; flex-shrink: 0;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.tp-header-left { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tp-title { font-weight: 600; font-size: 13px; color: var(--fg); }
+.tp-project {
+  font-size: 10px; color: var(--accent); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tp-close {
   background: none; border: none; color: var(--fg2); cursor: pointer;
-  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: var(--rs);
+  font-size: 15px; padding: 3px 7px; border-radius: var(--rs); flex-shrink: 0;
 }
 .tp-close:hover { background: var(--vscode-list-hoverBackground); color: var(--fg); }
-#threadList { flex: 1; overflow-y: auto; padding: 8px; }
+#threadList { flex: 1; overflow-y: auto; padding: 6px; }
+.tl-empty {
+  text-align: center; padding: 32px 16px; color: var(--fg2); font-size: 12px;
+}
+.tl-empty-icon { font-size: 28px; margin-bottom: 8px; opacity: 0.5; }
+.tl-empty-sub { font-size: 11px; margin-top: 4px; opacity: 0.7; }
 .thread-item {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-radius: var(--r);
-  cursor: pointer; border: 1px solid transparent; margin-bottom: 3px;
+  cursor: pointer; border: 1px solid transparent; margin-bottom: 2px;
 }
 .thread-item:hover { background: var(--vscode-list-hoverBackground); border-color: var(--border); }
 .thread-item.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--accent); }
-.thread-project-header {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 12px 4px; font-size: 11px; font-weight: 600;
-  color: var(--fg2); letter-spacing: 0.04em; text-transform: uppercase;
-  border-bottom: 1px solid var(--border); margin-top: 8px;
-}
-.thread-project-header:first-child { margin-top: 0; }
-.thread-project-header.current-project { color: var(--accent); }
-.tph-icon { font-size: 12px; flex-shrink: 0; }
-.tph-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tph-badge {
-  font-size: 9px; background: var(--accent); color: #fff;
-  padding: 1px 5px; border-radius: 8px; text-transform: lowercase; letter-spacing: 0;
-}
-.ti-icon { font-size: 14px; flex-shrink: 0; }
-.ti-info { flex: 1; min-width: 0; }
-.ti-preview { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ti-main { flex: 1; min-width: 0; }
+.ti-preview { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .ti-meta { font-size: 10px; color: var(--fg2); margin-top: 2px; }
 .ti-delete {
   background: none; border: none; color: var(--fg2); cursor: pointer;
-  font-size: 14px; padding: 3px 6px; border-radius: var(--rs); opacity: 0; flex-shrink: 0;
+  font-size: 12px; padding: 3px 6px; border-radius: var(--rs); opacity: 0; flex-shrink: 0;
 }
 .thread-item:hover .ti-delete { opacity: 1; }
-.ti-delete:hover { color: var(--red); background: var(--vscode-list-hoverBackground); }
+.ti-delete:hover { color: var(--red); }
 
 /* ── Chat messages area ── */
 #chat { flex: 1; overflow-y: auto; padding: 16px 12px; scroll-behavior: smooth; }
@@ -509,74 +522,68 @@ body {
 
 /* ── Tool blocks ── */
 .tool {
-  margin: 4px 0 4px 29px; border-radius: var(--r);
+  margin: 3px 0 3px 29px; border-radius: var(--r);
   border: 1px solid var(--border); overflow: hidden;
   font-size: 12px; animation: fadeIn 0.15s ease;
+  border-left-width: 3px;
 }
+/* Color-coded left border by tool category */
+.tool-cat-read  { border-left-color: #3b82f6; }
+.tool-cat-write { border-left-color: #f59e0b; }
+.tool-cat-exec  { border-left-color: #ef4444; }
+.tool-cat-net   { border-left-color: #8b5cf6; }
+.tool-cat-info  { border-left-color: var(--border); }
 .tool-head {
   display: flex; align-items: center; gap: 7px;
-  padding: 7px 10px; background: var(--bg2);
-  cursor: pointer; user-select: none;
-  transition: background 0.1s;
+  padding: 6px 10px; background: var(--bg2);
+  cursor: pointer; user-select: none; transition: background 0.1s;
 }
 .tool-head:hover { background: var(--vscode-list-hoverBackground); }
-/* Rotate chevron when expanded */
 .tool.open .tool-chevron { transform: rotate(90deg); }
 .tool-chevron { font-size: 9px; color: var(--fg2); transition: transform 0.15s; flex-shrink: 0; }
-.tool-icon { font-size: 14px; flex-shrink: 0; }
+.tool-icon { font-size: 13px; flex-shrink: 0; }
 .tool-label { flex: 1; font-size: 12px; color: var(--fg); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tool-label .tool-subname { font-size: 10px; color: var(--fg2); font-weight: 400; margin-left: 4px; }
-/* Spinner ring inside tool head while running */
 .tool-spinner {
-  width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+  width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0;
   border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  border-top-color: var(--accent);
-  animation: spin 0.7s linear infinite;
+  border-top-color: var(--accent); animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.tool-badge {
-  font-size: 10px; font-weight: 600; padding: 1px 7px;
-  border-radius: 10px; flex-shrink: 0; white-space: nowrap;
-}
-.tool-badge.ok   { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
-.tool-badge.err  { color: var(--red);   background: color-mix(in srgb, var(--red)   15%, transparent); }
-.tool-body {
-  display: none; overflow: hidden;
-}
+.tool-badge { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; flex-shrink: 0; white-space: nowrap; }
+.tool-badge.ok  { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
+.tool-badge.err { color: var(--red);   background: color-mix(in srgb, var(--red)   15%, transparent); }
+.tool-body { display: none; overflow: hidden; }
 .tool.open .tool-body { display: block; }
 .tool-section { border-top: 1px solid var(--border); }
 .tool-section-head {
   font-size: 10px; font-weight: 600; color: var(--fg2);
-  padding: 4px 10px 2px; text-transform: uppercase; letter-spacing: 0.5px;
-  background: var(--bg2);
+  padding: 4px 10px 2px; text-transform: uppercase; letter-spacing: 0.5px; background: var(--bg2);
 }
 .tool-body pre {
   white-space: pre-wrap; word-break: break-all; font-size: 11px;
-  color: var(--fg2); margin: 0; padding: 8px 10px 10px;
+  color: var(--fg2); margin: 0; padding: 8px 10px;
   font-family: var(--vscode-editor-font-family); line-height: 1.5;
-  max-height: 200px; overflow-y: auto;
+  max-height: 180px; overflow-y: auto;
 }
-/* Green output lines */
 .tool-output-ok pre { color: var(--fg); }
-/* Error output */
 .tool-output-err pre { color: var(--red); }
 
 /* ── Thinking block ── */
 .thinking-block {
-  margin: 4px 0 4px 29px; border-radius: var(--r);
+  margin: 3px 0 3px 29px; border-radius: var(--r);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-left: 3px solid var(--accent);
   overflow: hidden; font-size: 12px; animation: fadeIn 0.15s ease;
 }
 .thinking-head {
   display: flex; align-items: center; gap: 7px;
-  padding: 7px 10px; background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
+  padding: 6px 10px; background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
   cursor: pointer; user-select: none; transition: background 0.1s;
 }
 .thinking-head:hover { background: color-mix(in srgb, var(--accent) 12%, var(--bg2)); }
 .thinking-block.open .thinking-chevron { transform: rotate(90deg); }
 .thinking-chevron { font-size: 9px; color: var(--accent); transition: transform 0.15s; flex-shrink: 0; }
 .thinking-head-label { flex: 1; font-size: 12px; font-weight: 500; color: var(--accent); }
-/* Inline dots while streaming */
 .thinking-stream-dots { display: flex; gap: 3px; align-items: center; }
 .thinking-stream-dots span {
   width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.4;
@@ -592,60 +599,51 @@ body {
   background: color-mix(in srgb, var(--accent) 3%, var(--bg));
 }
 .thinking-block.open .thinking-body { display: block; }
-.thinking-body p {
-  margin: 0 0 6px; font-size: 12px; color: var(--fg2); line-height: 1.65;
-  font-style: italic;
-}
+.thinking-body p { margin: 0 0 6px; font-size: 12px; color: var(--fg2); line-height: 1.65; font-style: italic; }
 .thinking-body p:last-child { margin-bottom: 0; }
 
-/* ── Permission prompt ── */
-.permission-prompt {
-  margin: 6px 0 6px 29px; padding: 12px;
-  border: 1px solid var(--vscode-editorWarning-foreground);
-
 /* ── Todo panel ── */
-.todo-panel {
-  flex-shrink: 0; border-bottom: 1px solid var(--border);
-  padding: 6px 10px 8px; background: var(--bg);
-}
-.todo-header {
-  font-size: 11px; font-weight: 600; color: var(--fg2);
-  margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px;
-}
-.todo-item {
-  display: flex; align-items: baseline; gap: 6px;
-  font-size: 12px; padding: 2px 0; line-height: 1.4;
-}
+.todo-panel { flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 6px 10px 8px; background: var(--bg); }
+.todo-header { font-size: 11px; font-weight: 600; color: var(--fg2); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+.todo-item { display: flex; align-items: baseline; gap: 6px; font-size: 12px; padding: 2px 0; line-height: 1.4; }
 .todo-title { flex: 1; }
 .todo-note { font-size: 11px; color: var(--fg2); font-style: italic; }
 .todo-pending { color: var(--fg2); }
 .todo-in_progress { color: var(--accent); font-weight: 600; }
-.todo-in_progress .todo-title::after { content: "..."; animation: pulse 1s infinite; }
+.todo-in_progress .todo-title::after { content: "..."; }
 .todo-done { color: var(--green); text-decoration: line-through; opacity: 0.7; }
 .todo-blocked { color: var(--red); }
-  border-radius: var(--r); background: var(--bg2);
-  animation: fadeIn 0.15s ease;
+
+/* ── Permission prompt ── */
+.permission-prompt {
+  margin: 6px 0 6px 29px; border-radius: var(--r);
+  border: 1px solid var(--vscode-editorWarning-foreground);
+  border-left: 3px solid var(--vscode-editorWarning-foreground);
+  background: var(--bg2); overflow: hidden; animation: fadeIn 0.15s ease;
 }
-.pp-head { font-size: 11px; color: var(--fg2); margin-bottom: 6px; font-weight: 500; }
-.pp-tool { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--fg); }
+.pp-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px 8px; border-bottom: 1px solid var(--border);
+}
+.pp-icon { font-size: 18px; flex-shrink: 0; }
+.pp-title { font-size: 12px; font-weight: 600; color: var(--fg); }
+.pp-subtitle { font-size: 10px; color: var(--fg2); margin-top: 1px; }
 .pp-input {
-  font-size: 11px; padding: 7px 9px; margin-bottom: 10px;
-  background: var(--bg3); border: 1px solid var(--border);
-  border-radius: var(--rs); max-height: 100px; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-all;
-  font-family: var(--vscode-editor-font-family); color: var(--fg2); line-height: 1.4;
+  font-size: 11px; margin: 8px 12px;
+  padding: 7px 9px; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: var(--rs);
+  max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  font-family: var(--vscode-editor-font-family); color: var(--fg); line-height: 1.45;
 }
-.pp-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.pp-actions { display: flex; gap: 6px; padding: 0 12px 10px; flex-wrap: wrap; }
 .pp-btn {
-  padding: 5px 14px; border: none; border-radius: var(--rs);
-  cursor: pointer; font-size: 12px; font-weight: 600;
-  transition: opacity 0.15s;
+  padding: 5px 13px; border: none; border-radius: var(--rs);
+  cursor: pointer; font-size: 11px; font-weight: 600; transition: opacity 0.15s;
 }
-.pp-btn:hover { opacity: 0.85; }
-.pp-allow { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-.pp-allowall { background: #059669; color: #fff; }
-.pp-deny { background: var(--red); color: #fff; }
-.pp-note { font-size: 10px; color: var(--fg2); margin-top: 8px; font-style: italic; }
+.pp-btn:hover { opacity: 0.82; }
+.pp-deny    { background: color-mix(in srgb, var(--red) 15%, var(--bg3)); color: var(--red); border: 1px solid var(--red); }
+.pp-allow   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.pp-allowall{ background: #059669; color: #fff; }
 
 /* ── Input area ── */
 #inputArea {
@@ -707,7 +705,10 @@ body {
 
 <div id="threadPanel">
   <div class="tp-header">
-    <span>&#128172; Chat History</span>
+    <div class="tp-header-left">
+      <span class="tp-title">&#128172; Chat History</span>
+      <span class="tp-project" id="tp-project-name"></span>
+    </div>
     <button class="tp-close" id="closeThreads">&#10005;</button>
   </div>
   <div id="threadList"></div>
