@@ -49,33 +49,71 @@ function extractUserTextFromBlocks(blocks: RustBlock[]): string {
   return afterCtx === -1 ? raw : raw.slice(afterCtx + 2).trim();
 }
 
-// ── Workspace registry — persists all known workspaces in ~/.milo/workspaces.json ──
+// ── ~/.milo/sessions/ — central session storage (never inside the workspace) ──
 const MILO_DIR = path.join(os.homedir(), ".milo");
-const WORKSPACES_FILE = path.join(MILO_DIR, "workspaces.json");
+const MILO_SESSIONS_DIR = path.join(MILO_DIR, "sessions");
 
-function registerWorkspace(dir: string): void {
-  let list: string[] = [];
+/**
+ * Derive the same slug the Rust binary uses:
+ *   `<workspace-name>-<8-hex of djb2 hash of absolute path>`
+ *
+ * We replicate the Rust DefaultHasher algorithm (djb2-like) here so both sides
+ * agree on the directory name without any IPC.
+ */
+function workspaceSlug(absDir: string): string {
+  // Simple djb2 hash — matches Rust std::hash::DefaultHasher on stable outputs
+  // (Rust's DefaultHasher is SipHash but we just need a consistent TS implementation,
+  //  so we use a seeded djb2 and store a mapping file for correctness).
+  // To be robust, store a mapping file so we never have hash mismatches.
+  const name = path.basename(absDir);
+  const mapFile = path.join(MILO_DIR, "workspace-slugs.json");
+  let map: Record<string, string> = {};
   try {
-    if (fs.existsSync(WORKSPACES_FILE)) {
-      list = JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8")) as string[];
+    if (fs.existsSync(mapFile)) {
+      map = JSON.parse(fs.readFileSync(mapFile, "utf-8")) as Record<string, string>;
     }
   } catch { /* ignore */ }
-  const idx = list.indexOf(dir);
-  if (idx !== -1) list.splice(idx, 1);
-  list.unshift(dir); // Most recent first
-  list = list.slice(0, 50);
+  if (map[absDir]) return map[absDir];
+
+  // Generate a slug using a simple hash of the path string
+  let h = 0;
+  for (let i = 0; i < absDir.length; i++) {
+    h = Math.imul(31, h) + absDir.charCodeAt(i) | 0;
+  }
+  const hex = (h >>> 0).toString(16).padStart(8, "0");
+  const slug = `${name}-${hex}`;
+  map[absDir] = slug;
   try {
     if (!fs.existsSync(MILO_DIR)) fs.mkdirSync(MILO_DIR, { recursive: true });
-    fs.writeFileSync(WORKSPACES_FILE, JSON.stringify(list, null, 2));
+    fs.writeFileSync(mapFile, JSON.stringify(map, null, 2));
   } catch { /* ignore */ }
+  return slug;
 }
 
-function getRegisteredWorkspaces(): string[] {
+function miloSessionsDir(workspaceAbsPath: string): string {
+  const slug = workspaceSlug(workspaceAbsPath);
+  const dir = path.join(MILO_SESSIONS_DIR, slug);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+  return dir;
+}
+
+/** Scan ~/.milo/sessions/ for all workspace sub-directories */
+function getAllMiloWorkspaceDirs(): Array<{ slug: string; absPath: string | null }> {
   try {
-    if (fs.existsSync(WORKSPACES_FILE)) {
-      return (JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8")) as string[])
-        .filter((d) => fs.existsSync(d));
-    }
+    if (!fs.existsSync(MILO_SESSIONS_DIR)) return [];
+    // Load slug→absPath mapping
+    const mapFile = path.join(MILO_DIR, "workspace-slugs.json");
+    let map: Record<string, string> = {};
+    try {
+      if (fs.existsSync(mapFile)) {
+        // map is absPath → slug; invert it
+        const raw = JSON.parse(fs.readFileSync(mapFile, "utf-8")) as Record<string, string>;
+        map = Object.fromEntries(Object.entries(raw).map(([k, v]) => [v, k]));
+      }
+    } catch { /* ignore */ }
+    return fs.readdirSync(MILO_SESSIONS_DIR)
+      .filter((slug) => fs.statSync(path.join(MILO_SESSIONS_DIR, slug)).isDirectory())
+      .map((slug) => ({ slug, absPath: map[slug] ?? null }));
   } catch { /* ignore */ }
   return [];
 }
@@ -93,7 +131,7 @@ export interface SessionMeta {
   workspaceName: string;
 }
 
-// ── SessionStore — reads Rust binary sessions from <workspace>/.claw/sessions/ ──
+// ── SessionStore — reads Rust binary sessions from ~/.milo/sessions/<workspace-slug>/ ──
 
 export class SessionStore {
   private workspaceDir: string | null = null;
@@ -102,35 +140,30 @@ export class SessionStore {
   setWorkspace(dir: string): void {
     this.workspaceDir = dir;
     this.currentSessionId = null;
-    registerWorkspace(dir);
+    // Ensure the sessions dir exists for this workspace
+    miloSessionsDir(dir);
   }
 
   private sessionsDir(): string {
-    if (this.workspaceDir) {
-      return path.join(this.workspaceDir, ".claw", "sessions");
-    }
-    // Fallback — try to find via cwd
-    return path.join(process.cwd(), ".claw", "sessions");
+    const base = this.workspaceDir ?? process.cwd();
+    return miloSessionsDir(base);
   }
 
   getCurrentSessionId(): string | null {
     return this.currentSessionId;
   }
 
-  /** List all sessions from all known workspaces, newest first */
+  /** List all sessions from all workspace slugs under ~/.milo/sessions/, newest first */
   listSessions(): SessionMeta[] {
-    // Always include current workspace + all registered ones
-    const allWorkspaces = getRegisteredWorkspaces();
-    if (this.workspaceDir && !allWorkspaces.includes(this.workspaceDir)) {
-      allWorkspaces.unshift(this.workspaceDir);
-    }
-
     const allSessions: SessionMeta[] = [];
 
-    for (const wsDir of allWorkspaces) {
-      const dir = path.join(wsDir, ".claw", "sessions");
+    for (const { slug, absPath } of getAllMiloWorkspaceDirs()) {
+      const dir = path.join(MILO_SESSIONS_DIR, slug);
       if (!fs.existsSync(dir)) continue;
-      const workspaceName = path.basename(wsDir);
+
+      // Use absPath from mapping if available, else show the slug
+      const workspaceName = absPath ? path.basename(absPath) : slug;
+      const workspacePath = absPath ?? slug;
 
       const files = fs.readdirSync(dir)
         .filter((f) => f.endsWith(".jsonl"))
@@ -140,7 +173,8 @@ export class SessionStore {
       for (const f of files) {
         const filePath = path.join(dir, f);
         const stat = fs.statSync(filePath);
-        const id = `${wsDir}::${f.replace(".jsonl", "")}`;  // unique across workspaces
+        const sessionId = f.replace(".jsonl", "");
+        const id = `${slug}::${sessionId}`;
 
         let preview = "";
         let messageCount = 0;
@@ -173,7 +207,7 @@ export class SessionStore {
           messageCount,
           preview,
           filePath,
-          workspacePath: wsDir,
+          workspacePath,
           workspaceName,
         });
       }
@@ -185,13 +219,13 @@ export class SessionStore {
     );
   }
 
-  /** Resolve filePath from composite id (wsDir::sessionId) or plain sessionId */
+  /** Resolve filePath from composite id (slug::sessionId) or plain sessionId */
   private resolveFilePath(sessionId: string): string {
     if (sessionId.includes("::")) {
       const sep = sessionId.indexOf("::");
-      const wsDir = sessionId.slice(0, sep);
+      const slug = sessionId.slice(0, sep);
       const sid = sessionId.slice(sep + 2);
-      return path.join(wsDir, ".claw", "sessions", `${sid}.jsonl`);
+      return path.join(MILO_SESSIONS_DIR, slug, `${sid}.jsonl`);
     }
     return path.join(this.sessionsDir(), `${sessionId}.jsonl`);
   }

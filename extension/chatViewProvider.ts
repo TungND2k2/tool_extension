@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { ClawProcess, ClawStreamEvent } from "./clawProcess";
 import { onTodoUpdate, TodoItem } from "./tools";
 import { SessionStore } from "./sessionStore";
@@ -19,10 +22,27 @@ function extractUserText(stored: string): string {
   return stored.slice(afterCtx + 2).trim();
 }
 
+/**
+ * Ensure ~/.milo has the same sub-directory layout as ~/.claude:
+ *   sessions/, projects/, todos/, backups/, debug/, ide/, plugins/, telemetry/
+ * All data lives in the user's home directory — never in the workspace.
+ */
+function ensureMiloLayout(): void {
+  const miloDir = path.join(os.homedir(), ".milo");
+  const subdirs = ["sessions", "projects", "todos", "backups", "debug", "ide", "plugins", "telemetry"];
+  try {
+    for (const sub of subdirs) {
+      fs.mkdirSync(path.join(miloDir, sub), { recursive: true });
+    }
+  } catch { /* ignore — read-only fs */ }
+}
+
 export class ClawChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private isGenerating = false;
   private sessionStore = new SessionStore();
+  /** If true, auto-approve all permission prompts for this session without asking */
+  private allowAllPermissions = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -46,9 +66,13 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
     };
     webviewView.webview.html = this.getHtml();
 
-    // Set workspace for session store so it reads from <workspace>/.claw/sessions/
+    // Ensure ~/.milo directory layout exists (sessions, projects, todos, etc.)
+    ensureMiloLayout();
+
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (cwd) this.sessionStore.setWorkspace(cwd);
+    if (cwd) {
+      this.sessionStore.setWorkspace(cwd);
+    }
 
     // Restore last session
     this.restoreLastSession();

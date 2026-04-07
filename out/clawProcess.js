@@ -91,7 +91,7 @@ class ClawProcess {
         return `${baseUrl}/downloads/${fileName}`;
     }
     // Expected minimum version — bump this together with deploying a new binary to force auto-update
-    static MIN_VERSION = "0.1.0";
+    static MIN_VERSION = "0.1.1";
     getBinaryVersion(binaryPath) {
         try {
             const out = cp.execSync(`"${binaryPath}" --version 2>&1`, { encoding: "utf-8", timeout: 5000 });

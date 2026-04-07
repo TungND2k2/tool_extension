@@ -35,7 +35,7 @@ export interface ClawResult {
 }
 
 export interface ClawStreamEvent {
-  type: "stdout" | "stderr" | "done" | "error" | "downloading" | "text_delta" | "tool_start" | "tool_done";
+  type: "stdout" | "stderr" | "done" | "error" | "downloading" | "text_delta" | "tool_start" | "tool_done" | "permission_prompt";
   text?: string;
   result?: ClawResult;
   error?: string;
@@ -44,11 +44,14 @@ export interface ClawStreamEvent {
   toolInput?: string;
   toolOutput?: string;
   toolIsError?: boolean;
+  permissionName?: string;
+  permissionInput?: string;
 }
 
 export class ClawProcess {
   private proc: cp.ChildProcess | null = null;
   private hasSession = false;
+  private binaryReady = false; // cached after first successful ensureInstalled
 
   resetSession() {
     this.hasSession = false;
@@ -118,6 +121,8 @@ export class ClawProcess {
   }
 
   async ensureInstalled(onEvent: (event: ClawStreamEvent) => void): Promise<boolean> {
+    if (this.binaryReady) return true; // already verified this session
+
     const destPath = path.join(BIN_DIR, getClawBinaryName());
 
     // Check if binary needs update
@@ -127,9 +132,11 @@ export class ClawProcess {
         onEvent({ type: "downloading", text: `Updating Claw engine (${version ?? "unknown"} → ${ClawProcess.MIN_VERSION})...`, progress: 0 });
         try { fs.unlinkSync(destPath); } catch { /* ignore */ }
       } else {
+        this.binaryReady = true;
         return true; // up to date
       }
     } else if (this.isInstalled()) {
+      this.binaryReady = true;
       return true; // system PATH binary, skip version check
     } else {
       onEvent({ type: "downloading", text: "Downloading Claw Code engine...", progress: 0 });
@@ -164,6 +171,7 @@ export class ClawProcess {
         onEvent({ type: "downloading", text: "Installed successfully", progress: 100 });
       }
 
+      this.binaryReady = true;
       return true;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -243,13 +251,12 @@ export class ClawProcess {
   private getArgs(prompt: string): string[] {
     const config = vscode.workspace.getConfiguration("miloCode");
     const model = config.get<string>("model", "gemma4");
-    const permissionMode = config.get<string>("permissionMode", "workspace-write");
+    const permissionMode = config.get<string>("permissionMode", "default");
 
     const args = [
       "--model", model,
       "--output-format", "json",
       "--permission-mode", permissionMode,
-      "--dangerously-skip-permissions",
     ];
 
     // Resume previous session for conversation continuity
@@ -259,6 +266,13 @@ export class ClawProcess {
 
     args.push(prompt);
     return args;
+  }
+
+  /** Send permission response ('y' = allow, 'n' = deny) to the running binary via stdin. */
+  sendPermissionResponse(allow: boolean): void {
+    if (this.proc?.stdin && !this.proc.stdin.destroyed) {
+      this.proc.stdin.write(allow ? "y\n" : "n\n");
+    }
   }
 
   isConfigured(): boolean {
@@ -291,8 +305,7 @@ export class ClawProcess {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      // Close stdin immediately — binary must not wait for user input
-      this.proc.stdin?.end();
+      // Keep stdin open so we can write permission responses later
 
       this.proc.stdout?.on("data", (data: Buffer) => {
         stdout += data.toString();
@@ -309,6 +322,8 @@ export class ClawProcess {
             onEvent({ type: "tool_start" as const, toolName: evt.name, toolInput: evt.input });
           } else if (evt.event === "tool_done") {
             onEvent({ type: "tool_done" as const, toolName: evt.name, toolOutput: evt.output, toolIsError: evt.is_error });
+          } else if (evt.event === "permission_prompt") {
+            onEvent({ type: "permission_prompt" as const, permissionName: evt.name, permissionInput: evt.input ?? evt.command ?? "" });
           }
         } catch {
           // Not JSON — ignore

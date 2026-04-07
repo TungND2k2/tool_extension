@@ -223,7 +223,21 @@ class ClawChatViewProvider {
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
         // Append project context as system-level prefix to prompt
         const projectCtx = (0, projectContext_1.getProjectContextPrompt)(cwd);
-        const fullPrompt = projectCtx ? `${projectCtx}\n\n${prompt}` : prompt;
+        // Detect OS for shell hints
+        const isWin = process.platform === "win32";
+        const shellHint = isWin
+            ? "You are running on Windows. For shell commands use cmd syntax (e.g. `mkdir project\\todo-list` not `mkdir -p`). Never use bash-only flags."
+            : "You are running on Linux/macOS. Use standard bash/sh commands.";
+        const systemInstructions = `## Agent Instructions
+
+${shellHint}
+
+IMPORTANT RULES:
+- When a tool call fails or returns an error, ALWAYS retry with a different approach. Never give up after one failure.
+- If a command is not found, try alternative commands or a different shell syntax.
+- Never tell the user to run commands manually unless you have exhausted all options (at least 3 retries).
+- Always complete the task fully before stopping.`;
+        const fullPrompt = `${systemInstructions}${projectCtx ? "\n\n" + projectCtx : ""}\n\n${prompt}`;
         let streamStarted = false;
         // tool_start events carry only name+input (no id from Rust binary) — use name as id key
         const pendingTools = new Map(); // name → unique id

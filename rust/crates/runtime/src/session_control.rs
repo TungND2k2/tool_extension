@@ -1,11 +1,37 @@
 #![allow(dead_code)]
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::session::{Session, SessionError};
+
+/// Return the global `~/.milo/sessions/` root, creating it if needed.
+fn milo_sessions_root() -> Result<PathBuf, SessionControlError> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| SessionControlError::Format("cannot determine home directory".into()))?;
+    let root = home.join(".milo").join("sessions");
+    fs::create_dir_all(&root)?;
+    Ok(root)
+}
+
+/// Derive a stable, short directory name for a workspace path.
+/// Format: `<workspace-name>-<8-hex-hash>` so it is human-readable but unique.
+fn workspace_slug(workspace_path: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    workspace_path.hash(&mut hasher);
+    let hash = hasher.finish();
+    let name = workspace_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    format!("{name}-{hash:08x}")
+}
 
 pub const PRIMARY_SESSION_EXTENSION: &str = "jsonl";
 pub const LEGACY_SESSION_EXTENSION: &str = "json";
@@ -81,7 +107,9 @@ pub fn sessions_dir() -> Result<PathBuf, SessionControlError> {
 pub fn managed_sessions_dir_for(
     base_dir: impl AsRef<Path>,
 ) -> Result<PathBuf, SessionControlError> {
-    let path = base_dir.as_ref().join(".claw").join("sessions");
+    let base = base_dir.as_ref().canonicalize().unwrap_or_else(|_| base_dir.as_ref().to_path_buf());
+    let slug = workspace_slug(&base);
+    let path = milo_sessions_root()?.join(slug);
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -318,13 +346,13 @@ fn session_id_from_path(path: &Path) -> Option<String> {
 
 fn format_missing_session_reference(reference: &str) -> String {
     format!(
-        "session not found: {reference}\nHint: managed sessions live in .claw/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
+        "session not found: {reference}\nHint: managed sessions live in ~/.milo/sessions/. Try `{LATEST_SESSION_REFERENCE}` for the most recent session or `/session list` in the REPL."
     )
 }
 
 fn format_no_managed_sessions() -> String {
     format!(
-        "no managed sessions found in .claw/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
+        "no managed sessions found in ~/.milo/sessions/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`."
     )
 }
 
