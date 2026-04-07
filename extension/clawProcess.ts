@@ -79,6 +79,29 @@ export class ClawProcess {
     return `${baseUrl}/downloads/${fileName}`;
   }
 
+  // Expected minimum version — bump this together with deploying a new binary to force auto-update
+  private static readonly MIN_VERSION = "0.1.0";
+
+  private getBinaryVersion(binaryPath: string): string | null {
+    try {
+      const out = cp.execSync(`"${binaryPath}" --version 2>&1`, { encoding: "utf-8", timeout: 5000 });
+      // Output: "Claw Code\n  Version          0.1.0\n..."
+      const match = out.match(/Version\s+([\d.]+)/);
+      return match ? match[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private isVersionOutdated(version: string | null): boolean {
+    if (!version) return true;
+    const [maj, min, patch] = version.split(".").map(Number);
+    const [rMaj, rMin, rPatch] = ClawProcess.MIN_VERSION.split(".").map(Number);
+    if (maj !== rMaj) return maj < rMaj;
+    if (min !== rMin) return min < rMin;
+    return patch < rPatch;
+  }
+
   isInstalled(): boolean {
     const clawPath = this.getClawPath();
 
@@ -95,9 +118,22 @@ export class ClawProcess {
   }
 
   async ensureInstalled(onEvent: (event: ClawStreamEvent) => void): Promise<boolean> {
-    if (this.isInstalled()) return true;
+    const destPath = path.join(BIN_DIR, getClawBinaryName());
 
-    onEvent({ type: "downloading", text: "Downloading Claw Code engine...", progress: 0 });
+    // Check if binary needs update
+    if (fs.existsSync(destPath)) {
+      const version = this.getBinaryVersion(destPath);
+      if (this.isVersionOutdated(version)) {
+        onEvent({ type: "downloading", text: `Updating Claw engine (${version ?? "unknown"} → ${ClawProcess.MIN_VERSION})...`, progress: 0 });
+        try { fs.unlinkSync(destPath); } catch { /* ignore */ }
+      } else {
+        return true; // up to date
+      }
+    } else if (this.isInstalled()) {
+      return true; // system PATH binary, skip version check
+    } else {
+      onEvent({ type: "downloading", text: "Downloading Claw Code engine...", progress: 0 });
+    }
 
     try {
       // Create ~/.milo/bin/
@@ -106,10 +142,15 @@ export class ClawProcess {
       }
 
       const downloadUrl = this.getDownloadUrl();
-      const destPath = path.join(BIN_DIR, getClawBinaryName());
 
+      let lastReported = -1;
       await this.downloadFile(downloadUrl, destPath, (progress) => {
-        onEvent({ type: "downloading", text: `Downloading... ${progress}%`, progress });
+        // Throttle: only emit every 10% to avoid spamming the UI
+        const bucket = Math.floor(progress / 10) * 10;
+        if (bucket > lastReported) {
+          lastReported = bucket;
+          onEvent({ type: "downloading", text: `Downloading... ${progress}%`, progress });
+        }
       });
 
       // Make executable
@@ -208,6 +249,7 @@ export class ClawProcess {
       "--model", model,
       "--output-format", "json",
       "--permission-mode", permissionMode,
+      "--dangerously-skip-permissions",
     ];
 
     // Resume previous session for conversation continuity
@@ -241,6 +283,7 @@ export class ClawProcess {
     return new Promise((resolve) => {
       let stdout = "";
       let stderr = "";
+      let stderrBuf = ""; // partial-line buffer for streaming events
 
       this.proc = cp.spawn(clawPath, args, {
         cwd,
@@ -248,30 +291,41 @@ export class ClawProcess {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
+      // Close stdin immediately — binary must not wait for user input
+      this.proc.stdin?.end();
+
       this.proc.stdout?.on("data", (data: Buffer) => {
         stdout += data.toString();
       });
+
+      const parseStderrLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("{")) return;
+        try {
+          const evt = JSON.parse(trimmed);
+          if (evt.event === "text_delta") {
+            onEvent({ type: "text_delta" as const, text: evt.text });
+          } else if (evt.event === "tool_start") {
+            onEvent({ type: "tool_start" as const, toolName: evt.name, toolInput: evt.input });
+          } else if (evt.event === "tool_done") {
+            onEvent({ type: "tool_done" as const, toolName: evt.name, toolOutput: evt.output, toolIsError: evt.is_error });
+          }
+        } catch {
+          // Not JSON — ignore
+        }
+      };
 
       this.proc.stderr?.on("data", (data: Buffer) => {
         const text = data.toString();
         stderr += text;
 
-        // Parse JSON progress events from stderr (one per line)
-        for (const line of text.split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("{")) continue;
-          try {
-            const evt = JSON.parse(trimmed);
-            if (evt.event === "text_delta") {
-              onEvent({ type: "text_delta" as const, text: evt.text });
-            } else if (evt.event === "tool_start") {
-              onEvent({ type: "tool_start" as const, toolName: evt.name, toolInput: evt.input });
-            } else if (evt.event === "tool_done") {
-              onEvent({ type: "tool_done" as const, toolName: evt.name, toolOutput: evt.output, toolIsError: evt.is_error });
-            }
-          } catch {
-            // Not JSON — ignore
-          }
+        // Buffer partial lines — a chunk may not end on a newline boundary
+        stderrBuf += text;
+        const lines = stderrBuf.split("\n");
+        // Keep the last element (may be incomplete) in the buffer
+        stderrBuf = lines.pop() ?? "";
+        for (const line of lines) {
+          parseStderrLine(line);
         }
       });
 
@@ -281,6 +335,10 @@ export class ClawProcess {
       });
 
       this.proc.on("close", (code) => {
+        // Flush any remaining partial line in buffer
+        if (stderrBuf.trim()) parseStderrLine(stderrBuf);
+        stderrBuf = "";
+
         if (code === 0 && stdout.trim()) {
           this.hasSession = true;
           try {

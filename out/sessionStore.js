@@ -35,136 +35,187 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SessionStore = void 0;
 const fs = __importStar(require("fs"));
-const os = __importStar(require("os"));
 const path = __importStar(require("path"));
+const os = __importStar(require("os"));
+function extractText(blocks) {
+    return blocks
+        .filter((b) => b.type === "text" && b.text)
+        .map((b) => b.text)
+        .join("\n");
+}
+/** Like extractText but strips workspace context prefix for clean previews */
+function extractUserTextFromBlocks(blocks) {
+    const raw = extractText(blocks);
+    const marker = "## Workspace Structure";
+    const idx = raw.indexOf(marker);
+    if (idx === -1)
+        return raw;
+    const afterCtx = raw.indexOf("\n\n", idx + marker.length);
+    return afterCtx === -1 ? raw : raw.slice(afterCtx + 2).trim();
+}
+// ── Workspace registry — persists all known workspaces in ~/.milo/workspaces.json ──
 const MILO_DIR = path.join(os.homedir(), ".milo");
-const SESSIONS_DIR = path.join(MILO_DIR, "sessions");
-function ensureDir(dir) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+const WORKSPACES_FILE = path.join(MILO_DIR, "workspaces.json");
+function registerWorkspace(dir) {
+    let list = [];
+    try {
+        if (fs.existsSync(WORKSPACES_FILE)) {
+            list = JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8"));
+        }
     }
+    catch { /* ignore */ }
+    const idx = list.indexOf(dir);
+    if (idx !== -1)
+        list.splice(idx, 1);
+    list.unshift(dir); // Most recent first
+    list = list.slice(0, 50);
+    try {
+        if (!fs.existsSync(MILO_DIR))
+            fs.mkdirSync(MILO_DIR, { recursive: true });
+        fs.writeFileSync(WORKSPACES_FILE, JSON.stringify(list, null, 2));
+    }
+    catch { /* ignore */ }
 }
-function generateId() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function getRegisteredWorkspaces() {
+    try {
+        if (fs.existsSync(WORKSPACES_FILE)) {
+            return JSON.parse(fs.readFileSync(WORKSPACES_FILE, "utf-8"))
+                .filter((d) => fs.existsSync(d));
+        }
+    }
+    catch { /* ignore */ }
+    return [];
 }
-function nowMs() {
-    return Date.now();
-}
-// ── SessionStore ──
+// ── SessionStore — reads Rust binary sessions from <workspace>/.claw/sessions/ ──
 class SessionStore {
+    workspaceDir = null;
     currentSessionId = null;
-    currentFilePath = null;
-    /** Start a new session */
-    newSession() {
-        ensureDir(SESSIONS_DIR);
-        this.currentSessionId = generateId();
-        this.currentFilePath = path.join(SESSIONS_DIR, `${this.currentSessionId}.jsonl`);
-        // Write session header
-        const header = {
-            type: "session",
-            session_id: this.currentSessionId,
-            version: 1,
-            created_at: nowMs(),
-        };
-        fs.writeFileSync(this.currentFilePath, JSON.stringify(header) + "\n", "utf-8");
+    setWorkspace(dir) {
+        this.workspaceDir = dir;
+        this.currentSessionId = null;
+        registerWorkspace(dir);
+    }
+    sessionsDir() {
+        if (this.workspaceDir) {
+            return path.join(this.workspaceDir, ".claw", "sessions");
+        }
+        // Fallback — try to find via cwd
+        return path.join(process.cwd(), ".claw", "sessions");
+    }
+    getCurrentSessionId() {
         return this.currentSessionId;
     }
-    /** Append a single message to the current session */
-    appendMessage(message) {
-        if (!this.currentFilePath) {
-            this.newSession();
-        }
-        const entry = {
-            type: "message",
-            role: message.role,
-            content: message.content,
-            timestamp: nowMs(),
-        };
-        fs.appendFileSync(this.currentFilePath, JSON.stringify(entry) + "\n", "utf-8");
-    }
-    /** Append tool results */
-    appendToolResults(results) {
-        if (!this.currentFilePath)
-            return;
-        for (const r of results) {
-            const entry = {
-                type: "tool_result",
-                tool_use_id: r.tool_use_id,
-                tool_name: r.tool_name,
-                output: r.output.slice(0, 5000), // cap output size
-                is_error: r.is_error,
-                timestamp: nowMs(),
-            };
-            fs.appendFileSync(this.currentFilePath, JSON.stringify(entry) + "\n", "utf-8");
-        }
-    }
-    /** Load messages from a session file (for resume) */
-    load(sessionId) {
-        const filePath = path.join(SESSIONS_DIR, `${sessionId}.jsonl`);
-        if (!fs.existsSync(filePath))
-            return [];
-        const content = fs.readFileSync(filePath, "utf-8");
-        const messages = [];
-        for (const line of content.split("\n")) {
-            if (!line.trim())
-                continue;
-            try {
-                const entry = JSON.parse(line);
-                if (entry.type === "message") {
-                    messages.push({
-                        role: entry.role,
-                        content: entry.content,
-                    });
-                }
-            }
-            catch { /* skip */ }
-        }
-        this.currentSessionId = sessionId;
-        this.currentFilePath = filePath;
-        return messages;
-    }
-    /** List all saved sessions, newest first */
+    /** List all sessions from all known workspaces, newest first */
     listSessions() {
-        ensureDir(SESSIONS_DIR);
-        const files = fs.readdirSync(SESSIONS_DIR)
-            .filter((f) => f.endsWith(".jsonl"))
-            .sort()
-            .reverse();
-        return files.map((f) => {
-            const filePath = path.join(SESSIONS_DIR, f);
-            const stat = fs.statSync(filePath);
-            const id = f.replace(".jsonl", "");
-            let preview = "";
-            let messageCount = 0;
-            try {
-                const content = fs.readFileSync(filePath, "utf-8");
-                const lines = content.split("\n").filter((l) => l.trim());
-                for (const line of lines) {
-                    const entry = JSON.parse(line);
-                    if (entry.type === "message") {
-                        messageCount++;
-                        if (!preview && entry.role === "user" && entry.content?.[0]?.text) {
-                            preview = entry.content[0].text.slice(0, 80);
+        // Always include current workspace + all registered ones
+        const allWorkspaces = getRegisteredWorkspaces();
+        if (this.workspaceDir && !allWorkspaces.includes(this.workspaceDir)) {
+            allWorkspaces.unshift(this.workspaceDir);
+        }
+        const allSessions = [];
+        for (const wsDir of allWorkspaces) {
+            const dir = path.join(wsDir, ".claw", "sessions");
+            if (!fs.existsSync(dir))
+                continue;
+            const workspaceName = path.basename(wsDir);
+            const files = fs.readdirSync(dir)
+                .filter((f) => f.endsWith(".jsonl"))
+                .sort()
+                .reverse();
+            for (const f of files) {
+                const filePath = path.join(dir, f);
+                const stat = fs.statSync(filePath);
+                const id = `${wsDir}::${f.replace(".jsonl", "")}`; // unique across workspaces
+                let preview = "";
+                let messageCount = 0;
+                let createdMs = stat.birthtimeMs;
+                let updatedMs = stat.mtimeMs;
+                try {
+                    for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+                        if (!line.trim())
+                            continue;
+                        const entry = JSON.parse(line);
+                        if (entry.type === "session_meta") {
+                            const m = entry;
+                            createdMs = m.created_at_ms;
+                            updatedMs = m.updated_at_ms;
+                        }
+                        else if (entry.type === "message") {
+                            const msg = entry.message;
+                            messageCount++;
+                            if (!preview && msg.role === "user") {
+                                preview = extractUserTextFromBlocks(msg.blocks).slice(0, 80);
+                            }
                         }
                     }
                 }
+                catch { /* ignore */ }
+                if (messageCount === 0)
+                    continue;
+                allSessions.push({
+                    id,
+                    createdAt: new Date(createdMs).toISOString(),
+                    updatedAt: new Date(updatedMs).toISOString(),
+                    messageCount,
+                    preview,
+                    filePath,
+                    workspacePath: wsDir,
+                    workspaceName,
+                });
             }
-            catch { /* ignore */ }
-            return { id, createdAt: stat.birthtime.toISOString(), updatedAt: stat.mtime.toISOString(), messageCount, preview, filePath };
-        });
+        }
+        // Sort all sessions newest first
+        return allSessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     }
-    /** Delete a session */
+    /** Resolve filePath from composite id (wsDir::sessionId) or plain sessionId */
+    resolveFilePath(sessionId) {
+        if (sessionId.includes("::")) {
+            const sep = sessionId.indexOf("::");
+            const wsDir = sessionId.slice(0, sep);
+            const sid = sessionId.slice(sep + 2);
+            return path.join(wsDir, ".claw", "sessions", `${sid}.jsonl`);
+        }
+        return path.join(this.sessionsDir(), `${sessionId}.jsonl`);
+    }
+    /** Load messages from a session (for UI replay) */
+    load(sessionId) {
+        const filePath = this.resolveFilePath(sessionId);
+        if (!fs.existsSync(filePath))
+            return [];
+        const messages = [];
+        try {
+            for (const line of fs.readFileSync(filePath, "utf-8").split("\n")) {
+                if (!line.trim())
+                    continue;
+                const entry = JSON.parse(line);
+                if (entry.type === "message") {
+                    const msg = entry.message;
+                    const text = extractText(msg.blocks);
+                    if (text) {
+                        messages.push({
+                            role: msg.role,
+                            content: [{ type: "text", text }],
+                        });
+                    }
+                }
+            }
+        }
+        catch { /* ignore */ }
+        this.currentSessionId = sessionId;
+        return messages;
+    }
+    /** Delete a session file */
     delete(sessionId) {
-        const filePath = path.join(SESSIONS_DIR, `${sessionId}.jsonl`);
+        const filePath = this.resolveFilePath(sessionId);
         if (fs.existsSync(filePath))
             fs.unlinkSync(filePath);
         if (this.currentSessionId === sessionId) {
             this.currentSessionId = null;
-            this.currentFilePath = null;
         }
     }
-    getCurrentSessionId() {
-        return this.currentSessionId;
+    newSession() {
+        this.currentSessionId = null;
+        return "";
     }
 }
 exports.SessionStore = SessionStore;

@@ -5,6 +5,20 @@ import { SessionStore } from "./sessionStore";
 import { getWebviewScript } from "./webviewScript";
 import { getProjectContextPrompt } from "./projectContext";
 
+/**
+ * Strip workspace context prefix that was prepended to user prompts before sending to Rust binary.
+ * The context always starts with "\n\n## Workspace Structure" or "## Workspace Structure".
+ */
+function extractUserText(stored: string): string {
+  const marker = "## Workspace Structure";
+  const idx = stored.indexOf(marker);
+  if (idx === -1) return stored;
+  // User text follows the last double-newline after the context block
+  const afterCtx = stored.indexOf("\n\n", idx + marker.length);
+  if (afterCtx === -1) return stored;
+  return stored.slice(afterCtx + 2).trim();
+}
+
 export class ClawChatViewProvider implements vscode.WebviewViewProvider {
   private webviewView?: vscode.WebviewView;
   private isGenerating = false;
@@ -31,6 +45,10 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [this.extensionUri],
     };
     webviewView.webview.html = this.getHtml();
+
+    // Set workspace for session store so it reads from <workspace>/.claw/sessions/
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (cwd) this.sessionStore.setWorkspace(cwd);
 
     // Restore last session
     this.restoreLastSession();
@@ -70,14 +88,18 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
   private sendThreadList() {
     const sessions = this.sessionStore.listSessions();
     const currentId = this.sessionStore.getCurrentSessionId();
+    const currentWs = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
     this.webviewView?.webview.postMessage({
       type: "threadList",
+      currentWorkspacePath: currentWs,
       threads: sessions.map(s => ({
         id: s.id,
         preview: s.preview || "New chat",
         date: new Date(s.updatedAt).toLocaleDateString(),
         messageCount: s.messageCount,
         active: s.id === currentId,
+        workspacePath: s.workspacePath,
+        workspaceName: s.workspaceName,
       })),
     });
   }
@@ -91,7 +113,7 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
       const firstBlock = msg.content[0];
       if (!firstBlock) continue;
       if (msg.role === "user" && "text" in firstBlock) {
-        this.webviewView?.webview.postMessage({ type: "addMessage", role: "user", content: firstBlock.text });
+        this.webviewView?.webview.postMessage({ type: "addMessage", role: "user", content: extractUserText(firstBlock.text) });
       } else if (msg.role === "assistant") {
         const text = (msg.content as Array<{ type: string; text?: string }>)
           .filter(b => b.type === "text" && b.text)
@@ -125,7 +147,7 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
       const firstBlock = msg.content[0];
       if (!firstBlock) continue;
       if (msg.role === "user" && "text" in firstBlock) {
-        this.webviewView?.webview.postMessage({ type: "addMessage", role: "user", content: firstBlock.text });
+        this.webviewView?.webview.postMessage({ type: "addMessage", role: "user", content: extractUserText(firstBlock.text) });
       } else if (msg.role === "assistant") {
         const text = (msg.content as Array<{ type: string; text?: string }>)
           .filter(b => b.type === "text" && b.text)
@@ -175,7 +197,24 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     // Append project context as system-level prefix to prompt
     const projectCtx = getProjectContextPrompt(cwd);
-    const fullPrompt = projectCtx ? `${projectCtx}\n\n${prompt}` : prompt;
+
+    // Detect OS for shell hints
+    const isWin = process.platform === "win32";
+    const shellHint = isWin
+      ? "You are running on Windows. For shell commands use cmd syntax (e.g. `mkdir project\\todo-list` not `mkdir -p`). Never use bash-only flags."
+      : "You are running on Linux/macOS. Use standard bash/sh commands.";
+
+    const systemInstructions = `## Agent Instructions
+
+${shellHint}
+
+IMPORTANT RULES:
+- When a tool call fails or returns an error, ALWAYS retry with a different approach. Never give up after one failure.
+- If a command is not found, try alternative commands or a different shell syntax.
+- Never tell the user to run commands manually unless you have exhausted all options (at least 3 retries).
+- Always complete the task fully before stopping.`;
+
+    const fullPrompt = `${systemInstructions}${projectCtx ? "\n\n" + projectCtx : ""}\n\n${prompt}`;
 
     let streamStarted = false;
     // tool_start events carry only name+input (no id from Rust binary) — use name as id key
@@ -223,12 +262,13 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
 
         case "done":
           if (!streamStarted) {
-            // No text_delta came — show result message
+            // No text_delta came — show result message from JSON stdout
             this.webviewView?.webview.postMessage({ type: "streamStart" });
+            if (evt.result?.message) {
+              this.webviewView?.webview.postMessage({ type: "streamDelta", text: evt.result.message });
+            }
           }
-          if (evt.result?.message) {
-            this.webviewView?.webview.postMessage({ type: "streamDelta", text: evt.result.message });
-          }
+          // If streamStarted=true, text_delta already rendered the text — don't duplicate
           this.webviewView?.webview.postMessage({ type: "streamEnd" });
           break;
 
@@ -237,13 +277,16 @@ export class ClawChatViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "downloading":
-          this.webviewView?.webview.postMessage({ type: "showError", error: `⬇️ ${evt.text}` });
+          // Show a download progress notification, not an error
+          this.webviewView?.webview.postMessage({ type: "downloadProgress", text: evt.text, progress: evt.progress ?? 0 });
           break;
       }
     });
 
     this.isGenerating = false;
     this.webviewView?.webview.postMessage({ type: "generationStopped" });
+    // Refresh thread list after each turn (Rust may have created/updated a session)
+    this.sendThreadList();
   }
 
   private getHtml(): string {
@@ -301,6 +344,20 @@ body {
 }
 .thread-item:hover { background: var(--vscode-list-hoverBackground); border-color: var(--border); }
 .thread-item.active { background: var(--vscode-list-activeSelectionBackground); border-color: var(--accent); }
+.thread-project-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px 4px; font-size: 11px; font-weight: 600;
+  color: var(--fg2); letter-spacing: 0.04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border); margin-top: 8px;
+}
+.thread-project-header:first-child { margin-top: 0; }
+.thread-project-header.current-project { color: var(--accent); }
+.tph-icon { font-size: 12px; flex-shrink: 0; }
+.tph-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tph-badge {
+  font-size: 9px; background: var(--accent); color: #fff;
+  padding: 1px 5px; border-radius: 8px; text-transform: lowercase; letter-spacing: 0;
+}
 .ti-icon { font-size: 14px; flex-shrink: 0; }
 .ti-info { flex: 1; min-width: 0; }
 .ti-preview { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
