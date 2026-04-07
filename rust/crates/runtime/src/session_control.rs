@@ -9,8 +9,17 @@ use std::time::UNIX_EPOCH;
 
 use crate::session::{Session, SessionError};
 
-/// Return the global `~/.milo/sessions/` root, creating it if needed.
+/// Return the sessions root directory.
+/// Priority: CLAW_SESSIONS_DIR env var (set by VS Code extension to globalStorageUri/sessions)
+/// Fallback: ~/.milo/sessions/
 fn milo_sessions_root() -> Result<PathBuf, SessionControlError> {
+    if let Ok(dir) = std::env::var("CLAW_SESSIONS_DIR") {
+        if !dir.is_empty() {
+            let root = PathBuf::from(dir);
+            fs::create_dir_all(&root)?;
+            return Ok(root);
+        }
+    }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
