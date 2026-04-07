@@ -200,13 +200,22 @@ fn prepare_command(
         return prepared;
     }
 
-    let mut prepared = Command::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
-    if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+    #[cfg(target_os = "windows")]
+    {
+        let mut prepared = Command::new("cmd");
+        prepared.args(["/C", command]).current_dir(cwd);
+        return prepared;
     }
-    prepared
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut prepared = Command::new("sh");
+        prepared.arg("-lc").arg(command).current_dir(cwd);
+        if sandbox_status.filesystem_active {
+            prepared.env("HOME", cwd.join(".sandbox-home"));
+            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        }
+        prepared
+    }
 }
 
 fn prepare_tokio_command(
@@ -227,13 +236,22 @@ fn prepare_tokio_command(
         return prepared;
     }
 
-    let mut prepared = TokioCommand::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
-    if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+    #[cfg(target_os = "windows")]
+    {
+        let mut prepared = TokioCommand::new("cmd");
+        prepared.args(["/C", command]).current_dir(cwd);
+        return prepared;
     }
-    prepared
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut prepared = TokioCommand::new("sh");
+        prepared.arg("-lc").arg(command).current_dir(cwd);
+        if sandbox_status.filesystem_active {
+            prepared.env("HOME", cwd.join(".sandbox-home"));
+            prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        }
+        prepared
+    }
 }
 
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
